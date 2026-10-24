@@ -1,0 +1,32 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Validate stable release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node --input-type=module -e "import fs from 'node:fs'; import semver from 'semver'; const p=JSON.parse(fs.readFileSync('package.json')); if(process.env.RELEASE_TAG!=='v'+p.version || !semver.valid(p.version) || semver.prerelease(p.version)) process.exit(1);"
+      - run: npm run check
+      - run: npm test
+      - run: npm pack --ignore-scripts
+      - run: sha256sum dpsk-bridge-*.tgz > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dpsk-bridge-*.tgz SHA256SUMS --verify-tag --title "dpsk-bridge $RELEASE_TAG" --generate-notes

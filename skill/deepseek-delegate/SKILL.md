@@ -1,11 +1,11 @@
 ---
 name: deepseek-delegate
-description: Delegate bounded coding, investigation, batch processing, or MCP tasks from Claude Code or Codex to the local DeepSeek Harness (dsh) when a brief and targeted verification cost less than doing the work in the parent agent. Consider before extensive source reading, or when the user asks to use DeepSeek or a cheaper model.
+description: Delegate bounded coding, investigation, batch processing, or MCP tasks from any host agent with local command execution to DeepSeek Harness (dsh), with bidirectional updates and coordinated concurrency. Consider before extensive source reading, or when the user asks to use DeepSeek or a cheaper model.
 ---
 
-# DeepSeek 委派（dsh headless）
+# DeepSeek 委派（dpsk-bridge）
 
-供 Claude Code 和 Codex 共用。目标是降低完成并验收整个任务的总成本，包括主代理派单、DeepSeek 执行、主代理验收及返工。主代理负责理解用户目标、确定边界和验收；dsh 自行调查、实现并验证。使用本机 `@deepseek-ai/dsh` 的 headless 模式，按需加载 MCP。
+供具备本地命令执行能力的任意宿主代理使用，Claude Code 和 Codex 是示例。主代理负责理解用户目标、确定边界、回复执行中的问题并验收；dsh 自行调查、实现并验证。dpsk-bridge 使用 SDK 双向会话，按需加载 MCP。要求 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.2；先更新到要求版本，不使用旧启动方式或旧作业记录。
 
 ## 何时委派
 
@@ -23,7 +23,7 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 
 ## 写简短且自包含的 brief
 
-每次 headless 调用都是新会话，看不到主代理的对话。只传目标、必要上下文、边界和验收方式；现有规格或大段材料给路径，让 dsh 自己读取，不复制完整对话、源码或实现步骤。传递已确认适用的 `AGENTS.md`、`CLAUDE.md` 等约定路径，并在 brief 中写清影响本任务的硬性限制与用户决定；不要假定 dsh 自动继承宿主的指令、插件、MCP 配置或权限。
+每次 `dsb run` 或 `retry` 都是新会话，看不到主代理的对话。只传目标、必要上下文、边界和验收方式；现有规格或大段材料给路径，让 dsh 自己读取，不复制完整对话、源码或实现步骤。传递已确认适用的 `AGENTS.md`、`CLAUDE.md` 等约定路径，并在 brief 中写清影响本任务的硬性限制与用户决定；不要假定 dsh 自动继承宿主的指令、插件、MCP 配置或权限。
 
 ```text
 【目标】用户需要的行为或调查结论，以及完成条件。
@@ -43,14 +43,15 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 
 ## 调用与等待
 
-将 brief 以 UTF-8 写到临时目录或项目内适合放任务材料的位置。优先使用本包的 `dsb` 启动器：它保存原始要求、Git 状态基线、报告和退出码，并为同一仓库加执行锁。`run` / `retry` 持续运行直到作业结束，由宿主保留进程会话：
+将 brief 以 UTF-8 写到项目内适合放任务材料的位置。使用本包的 `dsb` 启动器：它保存原始要求、Git 状态基线、报告和退出码，并协调并发。`run` / `retry` 持续运行直到作业结束，由宿主保留进程会话并服务双向请求：
 
 | 宿主 | 启动与等待 |
 |---|---|
-| Claude Code | 使用 Bash 工具的 `run_in_background: true`，记录后台任务 ID，等待完成通知或按需读取任务结果。 |
+| 任意宿主 | 使用实际可用的后台命令或进程会话接口，保存句柄，用短而有界的等待读取更新，并检查问题和权限请求。 |
+| Claude Code | 使用 Bash 工具的 `run_in_background: true`，记录后台任务 ID；执行中读取桥接事件并回复请求，结束后读取结果。 |
 | Codex | 用当前可用的命令执行工具运行。若提供 `exec_command` / `write_stdin`，设置有界 `yield_time_ms`，保存返回的 `session_id`，再用 `write_stdin` 等待和读取后续结果；不要把 Claude 的后台参数传给 Codex。 |
 
-同时记录 `dsb` 输出的作业 ID；它不同于宿主的会话 ID。以当前工具实际支持的接口为准，缺少后台能力时使用有界同步执行；不要为了脱离宿主创建无人管理的进程。执行需要的文件、网络或子进程权限通过宿主现有授权流程处理。
+同时记录 `dsb` 输出的完整作业 ID；它不同于宿主的会话 ID。以当前工具实际支持的接口为准，不能丢弃进程句柄、创建无人管理的进程或无限等待。执行需要的文件、网络或子进程权限通过宿主现有授权流程处理。
 
 示例（`2700` 秒为示例上限，按任务调整；需要 MCP 时重复添加 `--patch <文件>`）：
 
@@ -58,11 +59,30 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 dsb run --cwd "<项目目录>" --brief "<brief 文件>" --timeout 2700
 ```
 
-- 等待宿主完成通知或用会话工具有界等待，不高频轮询。`dsb` 只返回启动记录和有长度上限的结果；完整报告、推理和错误日志留在返回的路径。失败时按需读取相关片段，不把全过程传回主代理。
+默认 provider/model 为 `deepseek-official` / `deepseek-v4-flash`；用 `--provider`、`--model` 或 `DPSK_PROVIDER`、`DPSK_MODEL` 覆盖，明确保留用户指定的路由。
+
+- 使用短而有界的会话等待，在等待间隙处理 `dsb events` 和 `status.pendingRequests`；不能只等最终完成通知，否则 dsh 的提问可能无人回复。无新内容时避免高频轮询。完整报告和错误日志留在返回的路径，按需读取相关片段。
 - `dsb status <ID>` 查询进程记录，`dsb result <ID>` 获取短报告。`completed` 仅表示进程退出码为 0；`reportedResult` 是模型自述，`acceptance` 才是主代理记录的验收结果。
-- 同仓库的 `dsb` 作业串行执行；独立工作区可以并行。锁不能阻止主代理、IDE 或其他启动方式的写入，主代理仍需协调任务范围。没有启动器时可按 [故障与恢复](references/troubleshooting.md) 中的直接调用方式执行。
+- 共享同一 `DSH_HOME` 的启动器默认并发上限为 8，使用 `DPSK_CONCURRENCY` 或 `--max-concurrent <1..256>` 调整；参与请求取最小上限，提高上限时为全部启动器设置一致值。同一工作区默认写互斥；重复指定 `--scope <路径>` 可让不重叠范围并行，路径相对于 Git 工作区根目录。`--read-only` 任务相互并行，与重叠写任务互斥；它只是协作声明，不会建立沙箱。重复指定 `--resource <名称>` 为跨工作区共享资源加互斥。主代理、IDE 和其他启动方式不受这些预约控制，仍需协调范围。
+- 本地文件系统队列持久保存排队状态；取消及超时覆盖排队阶段。未知状态和 `cleanup_failed` 保留预约，确认进程停止后才解锁。不要与旧版启动器混跑，旧作业记录不支持继续使用。
 - 需要 MCP 时读取 `~/.dsh/patches/*-mcp.yml` 的前 4 行，确认前提并只加载需要的 `--patch <文件>`，可重复此参数。不需要 MCP 就不加载；已有验证结果且配置未变时不要重复安装或做连通性测试。缺少配置时使用同包的 `dsh-mcp` skill。
 - 使用正确的项目根目录；遇到长路径、权限或文件占用问题时，按需读 [故障与恢复](references/troubleshooting.md)，不要临时改变项目范围或关闭沙箱来凑通调用。
+
+## 双向消息与请求
+
+执行中可补充上下文：将消息写入 UTF-8 文件，运行 `dsb send <ID> --message-file <文件>`。追加消息进入下一轮，不打断当前 step。作业结束后不能再 `send`；需要续做时用 `retry` 创建新会话。
+
+使用 `dsb events <ID> --after <字节游标> --limit 20` 读取更新，初始游标为 `0`；保存响应的 `cursor`，`more` 为真时继续翻页。`--limit` 默认 20、上限 200，游标是字节位置，不是事件序号。结合 `dsb status <ID>` 的 `pendingRequests`，识别 dsh 的问题和权限请求。
+
+将回复写为 JSON 文件，运行 `dsb answer <ID> --request <请求 ID> --answer <JSON 文件>`。普通问题的答案示例：
+
+```json
+{"answers":[{"id":"问题 ID","selected":[],"custom":"回复内容"}]}
+```
+
+`id` 使用请求中的问题 ID；有选项时按请求填写 `selected`。权限回复为 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。桥只转发权限决定，不能扩大授权；宿主依据已经取得的用户授权回复，不能自行决定时向用户澄清并等待，不能自动批准。
+
+`send` / `answer` 返回 `queued` 只表示已入队，必须继续读取 `input_delivered` 或 `input_rejected` 事件确认处理结果。请求 ID 与作业 ID 不同；不要向已过期或其他作业的请求发送回复。主代理在保持进程会话受管理的同时处理这些事件，避免将等待回复误判为停滞。
 
 ## 验收与返工
 
@@ -84,6 +104,8 @@ dsb run --cwd "<项目目录>" --brief "<brief 文件>" --timeout 2700
 
 ## 按需查看过程
 
-用户可以在真实终端运行 `dsv` 查看 TUI，不增加主代理的上下文。主代理只在报告不足或排查失败时使用 `dsv ls` 和 `dsv show <ID> --no-reasoning`，先限定输出到相关部分。并发或有其他会话时按项目、任务和时间确认 ID，不盲用 `latest`。
+用户可以在真实终端运行 `dsv` 查看 TUI，不增加主代理的上下文。主代理只在报告不足或排查失败时使用 `dsv ls` 和 `dsv show <ID> --no-reasoning`，先限定输出到相关部分。查看器读取 v4 明文或 zstd 日志，可通过 `DSH_SESSIONS_ROOT` 指定会话根目录。并发或有其他会话时按项目、任务和时间确认 ID，不盲用 `latest`。
+
+`dsv update --check` 立即检查桥的 GitHub Releases，`dsv update` 安装正式更新，TUI 中按 `u` 更新。`dsv update --auto on|off` 控制自动更新，默认关闭；TUI 发布检查缓存 6 小时。更新等待桥作业完成后取得独占预约，排队最多等待 60 秒，繁忙时稍后重试；不自动覆盖有改动或历史分叉的检出。更新期间 TUI 暂缓退出，完成后重新打开 `dsv`，并在宿主刷新已安装的 skills。自动同步已注册宿主 skills 的脚本当前要求 Windows，其他平台手动复制 `skill/` 内容到宿主技能目录。
 
 向用户汇报完成结果、实际验证和剩余限制，说明委派承担的工作。`dsb stats` 汇总任务、返工、验收和已观测会话用量；缺失用量不当作零，父会话用量不冒充完整账单。没有对照用量数据时，不宣称节省了具体金额或比例。
