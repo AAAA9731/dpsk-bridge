@@ -97,10 +97,56 @@ const rows=[{type:'session',version:4,id:'new',cwd:'/work/new',createdAt:Date.no
 fs.writeFileSync(path.join(dir,'session.v4.jsonl'),rows.map(JSON.stringify).join('\\n')+'\\n');
 fs.utimesSync(path.join(dir,'session.v4.jsonl'),new Date(),new Date(Date.now()+2000));
 timers.find(t=>t.ms===1000).callback();
-process.stdin.emit('data',Buffer.from('\\tk'));stdout(JSON.stringify(frames));process.exit(0);`;
+process.stdin.emit('data',Buffer.from('\\tgj'));stdout(JSON.stringify(frames));process.exit(0);`;
   const output = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, DSH_SESSIONS_ROOT: root }, timeout: 15000 });
   assert.equal(output.status, 0, output.stderr);
   const frames = JSON.parse(output.stdout).map(plain);
   assert.match(frames[1], /新到达的会话/); assert.match(frames[1], /已完成阅读界面调整/); assert.ok(!frames[1].includes('NEW_SESSION_RESULT'));
   assert.match(frames.at(-1), /NEW_SESSION_RESULT/);
+});
+
+test('time groups fold with keyboard and mouse, retain reading state, and stay folded on refresh', t => {
+  const root = fixture(t), now = new Date(2026, 0, 15, 12).getTime();
+  const reading = path.join(root, 'project', 'reading', 'session.v4.jsonl');
+  fs.utimesSync(reading, new Date(now), new Date(now));
+  for (const [id, days] of [['today-other', 0], ['yesterday', 1], ['week', 3], ['older', 12]]) {
+    const dir = path.join(root, 'project', id); fs.mkdirSync(dir, { recursive: true });
+    const events = [{ type: 'session', version: 4, id, cwd: '/work/' + id, createdAt: now },
+      { type: 'session/title', seq: 1, data: { title: 'TASK_' + id } },
+      { type: 'turn/start', seq: 2, data: { turn: 1 } },
+      { type: 'assistant/message', seq: 3, data: { turn: 1, message: { content: [{ type: 'text', text: 'ANSWER_' + id }] } } },
+      { type: 'turn/end', seq: 4, data: { turn: 1, reason: { kind: 'completed' } } }];
+    const file = path.join(dir, 'session.v4.jsonl'); fs.writeFileSync(file, events.map(JSON.stringify).join('\n') + '\n');
+    fs.utimesSync(file, new Date(now), new Date(now - days * 86400000 - 60000));
+  }
+  for (const columns of [128, 80]) {
+    const script = `
+const frames={},timers=[];let current='';const stdout=process.stdout.write.bind(process.stdout);Date.now=()=>${now};
+globalThis.setInterval=(callback,ms)=>{timers.push({callback,ms});return 1;};
+Object.defineProperty(process.stdout,'isTTY',{value:true});Object.defineProperty(process.stdin,'isTTY',{value:true});
+Object.defineProperty(process.stdout,'columns',{value:${columns}});Object.defineProperty(process.stdout,'rows',{value:20});
+process.stdin.setRawMode=()=>{};process.stdout.write=s=>{if(String(s).startsWith('\\x1b[H'))current=String(s);return true;};
+process.argv=['node',${JSON.stringify(cli)},'--no-update-check'];await import(${JSON.stringify(pathToFileURL(cli).href)});
+const key=s=>process.stdin.emit('data',Buffer.from(s));
+key('\\t');frames.initial=current;key('g\\r');frames.folded=current;
+timers.find(t=>t.ms===1000).callback();frames.refreshed=current;
+key('j ');frames.yesterdayOpen=current;key('j\\x1b[C');frames.readingYesterday=current;
+key('\\t\\x1b[D');frames.leftFold=current;key('\\x1b[C');frames.rightOpen=current;key(' ');
+key('\\x1b[<0;4;4M');frames.mouseOpen=current;key('\\x1b[<0;4;4M');frames.mouseFold=current;
+stdout(JSON.stringify(frames));process.exit(0);`;
+    const output = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, DSH_SESSIONS_ROOT: root }, timeout: 15000 });
+    assert.equal(output.status, 0, output.stderr);
+    const frames = Object.fromEntries(Object.entries(JSON.parse(output.stdout)).map(([key, value]) => [key, plain(value)]));
+    const sidebar = frame => frame.split('\r\n').slice(1, -1).map(line => columns >= 100 ? line.split('│')[0] : line).join('\n');
+    const initial = sidebar(frames.initial);
+    assert.match(initial, /▾ 今天\s+2/); assert.match(initial, /▸ 昨天\s+1/); assert.match(initial, /▸ 近 7 天\s+1/); assert.match(initial, /▸ 更早\s+1/);
+    assert.ok(!initial.includes('TASK_yesterday'));
+    assert.match(sidebar(frames.folded), /▸ 今天\s+2/); assert.ok(!sidebar(frames.folded).includes('优化会话查看器'));
+    assert.match(sidebar(frames.refreshed), /▸ 今天\s+2/);
+    if (columns >= 100) assert.match(frames.folded, /已完成阅读界面调整/);
+    assert.match(sidebar(frames.yesterdayOpen), /TASK_yesterday/); assert.match(frames.readingYesterday, /ANSWER_yesterday/);
+    assert.match(sidebar(frames.leftFold), /▸ 昨天/); assert.match(sidebar(frames.rightOpen), /TASK_yesterday/);
+    assert.match(sidebar(frames.mouseOpen), /▾ 今天/); assert.match(sidebar(frames.mouseFold), /▸ 今天/);
+    for (const frame of Object.values(frames)) assert.ok(frame.split('\r\n').length <= 20);
+  }
 });

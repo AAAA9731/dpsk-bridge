@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readEvents, createEventReader, listSessionFiles, sessionState, collectUsage } from '../lib/sessions.mjs';
 import { checkForUpdate, applyUpdate, readUpdateSettings, setAutoUpdate, recoverUpdate } from '../lib/updater.mjs';
-import { projectTranscript } from '../lib/viewer-model.mjs';
+import { projectTranscript, groupSessionsByTime } from '../lib/viewer-model.mjs';
 
 const ROOT = process.env.DSH_SESSIONS_ROOT || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
 const argv = process.argv.slice(2);
@@ -498,6 +498,8 @@ function tui() {
   let selId = null, autoPick = false;
   let focus = 'detail', view = 'detail';
   let listTop = 0, scroll = 0, cursor = 0, follow = false;
+  const collapsedGroups = new Set(['yesterday', 'week', 'older']);
+  let listCursor = null, listHits = [];
   let flash = null, frame = 0, lastFrame = '', bell = false, help = false, info = false;
   let footButtons = [];       // [{ x0, x1, run }] 1-based columns of the bottom menu bar
   let shown = { lines: [], keys: [], h: 1, c: null }; // what the detail pane last drew
@@ -573,7 +575,12 @@ function tui() {
       const pick = sessions.find(s => s.state === 'active') || sessions[0];
       if (pick.id !== selId) select(pick.id);
     }
-    if (!sessions.find(s => s.id === selId)) selId = (sessions.find(s => s.state === 'active') || sessions[0])?.id ?? null;
+    if (!sessions.find(s => s.id === selId)) {
+      select((sessions.find(s => s.state === 'active') || sessions[0])?.id ?? null);
+      const group = groupSessionsByTime(sessions).find(group => group.sessions.some(s => s.id === selId));
+      if (group) collapsedGroups.delete(group.key);
+      listCursor = selId ? `session:${selId}` : null;
+    }
   }
 
   // Remember scroll position per session so switching back and forth doesn't lose your place.
@@ -581,6 +588,7 @@ function tui() {
     const old = sessions.find(s => s.id === selId);
     if (old && cache.get(old.file)) cache.get(old.file).view = { scroll, cursor, follow };
     selId = id;
+    listCursor = id ? `session:${id}` : null;
     const s = sessions.find(x => x.id === id);
     const v = s && cache.get(s.file)?.view;
     if (v) ({ scroll, cursor, follow } = v); else { scroll = 0; cursor = 0; follow = false; }
@@ -604,22 +612,50 @@ function tui() {
   const icon = s => s.state === 'active' ? cyan('●') : s.state === 'done' ? gray('✓')
     : s.state === 'quiet' ? yellow('◌') : s.state === 'empty' ? gray('·') : red('✗');
 
-  function listRows(w, h) {
-    const rows = [];
-    const idx = Math.max(0, sessions.findIndex(s => s.id === selId));
-    const per = 3, fitN = Math.max(1, Math.floor((h - 2) / per));
-    rows.push(fit(gray('  最近任务'), w), ' '.repeat(w));
-    if (idx < listTop) listTop = idx;
-    if (idx >= listTop + fitN) listTop = idx - fitN + 1;
-    for (let i = listTop; i < Math.min(sessions.length, listTop + fitN); i++) {
-      const s = sessions[i], sel = s.id === selId;
-      const bg = sel ? SEL_BG : '';
-      const mark = sel ? (focus === 'list' ? cyan('▌') : gray('▌')) : ' ';
-      const title = safeText((s.title || s.prompt || '未命名任务').split('【桥接报告约定】')[0]);
-      rows.push(fit(`${mark} ${icon(s)} ${sel ? bold(cut(title, w - 5)) : cut(title, w - 5)}`, w, bg));
-      rows.push(fit(`${mark}   ${gray(cut(safeText(path.basename(s.cwd || '?')), w - 18))}  ${gray(ago(s.mtime))}${s.errors ? red(' !') : ''}`, w, bg));
-      rows.push(' '.repeat(w));
+  function sidebarItems() {
+    const groups = groupSessionsByTime(sessions), items = [];
+    for (const group of groups) {
+      items.push({ key: `group:${group.key}`, group });
+      if (!collapsedGroups.has(group.key)) for (const session of group.sessions) items.push({ key: `session:${session.id}`, group, session });
     }
+    if (!items.some(item => item.key === listCursor)) listCursor = items.find(item => item.session?.id === selId)?.key
+      || items.find(item => !item.session && item.group.sessions.some(s => s.id === selId))?.key || items[0]?.key || null;
+    return items;
+  }
+
+  function toggleGroup(item, collapsed = !collapsedGroups.has(item.group.key)) {
+    if (collapsed) collapsedGroups.add(item.group.key); else collapsedGroups.delete(item.group.key);
+    listCursor = `group:${item.group.key}`;
+    autoPick = false;
+  }
+
+  function listRows(w, h) {
+    const items = sidebarItems(), content = [], hits = [];
+    for (const item of items) {
+      const focused = focus === 'list' && item.key === listCursor;
+      if (!item.session) {
+        const closed = collapsedGroups.has(item.group.key), containsSelected = item.group.sessions.some(s => s.id === selId);
+        const mark = focused ? cyan('▌') : ' ';
+        const label = `${closed ? '▸' : '▾'} ${item.group.label}  ${item.group.sessions.length}`;
+        content.push(fit(`${mark} ${focused || containsSelected ? bold(label) : gray(label)}`, w, focused ? SEL_BG : ''));
+        hits.push(item);
+      } else {
+        const s = item.session, selected = s.id === selId;
+        const bg = focused || selected ? SEL_BG : '';
+        const mark = focused ? cyan('▌') : selected ? gray('▌') : ' ';
+        const title = safeText((s.title || s.prompt || '未命名任务').split('【桥接报告约定】')[0]);
+        content.push(fit(`${mark} ${icon(s)} ${selected ? bold(cut(title, w - 5)) : cut(title, w - 5)}`, w, bg),
+          fit(`${mark}   ${gray(cut(safeText(path.basename(s.cwd || '?')), w - 18))}  ${gray(ago(s.mtime))}${s.errors ? red(' !') : ''}`, w, bg), ' '.repeat(w));
+        hits.push(item, item, null);
+      }
+    }
+    const available = Math.max(1, h - 2), position = hits.findIndex(item => item?.key === listCursor);
+    const itemHeight = items.find(item => item.key === listCursor)?.session ? 2 : 1;
+    if (position < listTop) listTop = Math.max(0, position);
+    if (position + itemHeight > listTop + available) listTop = position + itemHeight - available;
+    listTop = Math.max(0, Math.min(listTop, content.length - available));
+    const rows = [fit(gray('  最近任务'), w), ' '.repeat(w), ...content.slice(listTop, listTop + available)];
+    listHits = [null, null, ...hits.slice(listTop, listTop + available)];
     if (!sessions.length) rows.push(fit(gray('  还没有会话'), w), fit(gray('  完成一次 dsb 任务后会显示在这里'), w));
     while (rows.length < h) rows.push(' '.repeat(w));
     return rows.slice(0, h);
@@ -643,7 +679,7 @@ function tui() {
     const curKey = keys[cursor];
     const rows = [];
     if (help) {
-      const notes = ['阅读方式', '', 'Tab  切换任务列表与正文', 'Enter  展开或收起当前内容', 'd  阅读结果 / 查看过程', 'r  显示思考', 'i  查看路径、ID和用量', 'f  展开全部内容', 'G  到底部并跟随', 'a  自动切换有更新的会话', 'u  检查并安装更新', 'b  完成提示音', '', '?  关闭帮助    q  退出'];
+      const notes = ['阅读方式', '', 'Tab  切换任务列表与正文', 'Enter / 空格  折叠时间组或展开内容', '← / →  收起 / 展开时间组', 'd  阅读结果 / 查看过程', 'r  显示思考', 'i  查看路径、ID和用量', 'f  展开全部内容', 'G  到底部并跟随', 'a  自动切换有更新的会话', 'u  检查并安装更新', 'b  完成提示音', '', '?  关闭帮助    q  退出'];
       return Array.from({ length: h }, (_, i) => fit(i === 0 ? bold(notes[i] || '') : gray(notes[i] || ''), w));
     }
     for (let i = 0; i < h; i++) {
@@ -705,7 +741,7 @@ function tui() {
       s += ` ${bold(keyLabel)} ${gray(text)} `;
       x += w;
     };
-    const actions = [['Tab', '切换', () => onKey('\t')], ['Enter', '展开', () => toggle(cursor)], ['d', DETAILS ? '阅读' : '过程', () => onKey('d')], ['?', '帮助', () => onKey('?')]];
+    const actions = [['Tab', '切换', () => onKey('\t')], ['Enter', '展开', () => onKey('\r')], ['d', DETAILS ? '阅读' : '过程', () => onKey('d')], ['?', '帮助', () => onKey('?')]];
     if (updateInfo?.available || updateTask) actions.push(['u', updateTask ? '更新中' : '更新', () => { void installUpdate(draw); }]);
     for (const [key, text, run] of actions) if (x + width(` ${key} ${text} `) + 10 < cols) button(key, text, run);
     const gap = Math.max(1, cols - x - width(' q 退出 ')); s += ' '.repeat(gap); x += gap;
@@ -715,9 +751,10 @@ function tui() {
 
   const invalidate = () => { for (const c of cache.values()) c.blocks = null; lastFrame = ''; };
   const move = d => {
-    const i = sessions.findIndex(s => s.id === selId);
-    const j = Math.max(0, Math.min(sessions.length - 1, i + d));
-    if (sessions[j] && sessions[j].id !== selId) select(sessions[j].id);
+    const items = sidebarItems(), i = items.findIndex(item => item.key === listCursor);
+    const item = items[Math.max(0, Math.min(items.length - 1, i + d))];
+    if (item?.session && item.session.id !== selId) select(item.session.id);
+    if (item) listCursor = item.key;
     autoPick = false;
   };
   const page = () => Math.max(1, (out.rows || 30) - 4);
@@ -760,7 +797,7 @@ function tui() {
     const t = TOGGLES.find(t => k === t.key || k === t.alt);
     if (t) t.run();
     else if (k === '\t') { focus = focus === 'list' ? 'detail' : 'list'; view = view === 'list' ? 'detail' : 'list'; }
-    else if (k === '\x1b' || k === `${ESC}D`) { focus = 'list'; view = 'list'; }
+    else if (k === '\x1b' || k === `${ESC}D` && inDetail()) { focus = 'list'; view = 'list'; }
     else if (inDetail()) {
       if (k === `${ESC}A` || k === 'k') moveCursor(-1);
       else if (k === `${ESC}B` || k === 'j') moveCursor(1);
@@ -772,7 +809,12 @@ function tui() {
       else if (k === 'e') { for (const key of shown.keys) if (key) shown.c?.open.add(key); }  // expand all in this session
       else if (k === 'E') shown.c?.open.clear();
     } else {
-      if (k === '\r' || k === `${ESC}C`) { focus = 'detail'; view = 'detail'; }
+      const item = sidebarItems().find(item => item.key === listCursor);
+      if (k === '\r' || k === ' ' || k === `${ESC}C`) {
+        if (item && !item.session) toggleGroup(item, k === `${ESC}C` ? false : undefined);
+        else { focus = 'detail'; view = 'detail'; }
+      }
+      else if (k === `${ESC}D` && item) toggleGroup(item, true);
       else if (k === `${ESC}A` || k === 'k') move(-1);
       else if (k === `${ESC}B` || k === 'j') move(1);
       else if (k === `${ESC}5~`) move(-5);
@@ -795,12 +837,13 @@ function tui() {
       if (overList) move(Math.sign(d)); else scrollBy(d);
     } else if (btn === 0 && press && y >= 2 && y <= (out.rows || 30) - 1) {
       if (overList) {
-        const i = listTop + Math.floor((y - 4) / 3);
-        if (y < 4) return;
-        if (sessions[i]) {
-          const openDetail = selId === sessions[i].id && !split;
+        const item = listHits[y - 2];
+        if (item) {
+          listCursor = item.key;
+          if (!item.session) { toggleGroup(item); focus = 'list'; draw(); return; }
+          const openDetail = selId === item.session.id && !split;
           if (openDetail) view = 'detail';
-          if (selId !== sessions[i].id) select(sessions[i].id);
+          if (selId !== item.session.id) select(item.session.id);
           autoPick = false; focus = openDetail ? 'detail' : 'list';
         }
       } else {

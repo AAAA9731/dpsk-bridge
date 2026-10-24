@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectTranscript } from '../lib/viewer-model.mjs';
+import { projectTranscript, groupSessionsByTime } from '../lib/viewer-model.mjs';
+
+test('time groups follow local calendar boundaries and keep the newest update first', () => {
+  const now = new Date(2026, 0, 15, 0, 5).getTime();
+  const time = (date, hour = 12) => new Date(2026, 0, date, hour).getTime();
+  const rows = [
+    { id: 'old', mtime: time(8) }, { id: 'week-end', mtime: time(9) },
+    { id: 'last-night', mtime: time(14, 23) }, { id: 'today', mtime: time(15, 0) },
+    { id: 'future', mtime: time(16) }, { id: 'week-start', mtime: time(13) },
+  ];
+  assert.deepEqual(groupSessionsByTime(rows, now).map(g => [g.key, g.sessions.map(s => s.id)]), [
+    ['today', ['future', 'today']], ['yesterday', ['last-night']], ['week', ['week-start', 'week-end']], ['older', ['old']],
+  ]);
+  assert.deepEqual(rows.map(s => s.id), ['old', 'week-end', 'last-night', 'today', 'future', 'week-start']);
+  assert.deepEqual(groupSessionsByTime([], now), []);
+});
 
 const text = value => [{ type: 'text', text: value }];
 const event = (seq, type, data = {}) => ({ seq, type, time: 1000 + seq, data });
