@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readEvents, createEventReader, listSessionFiles, sessionState, collectUsage } from '../lib/sessions.mjs';
 import { checkForUpdate, applyUpdate, readUpdateSettings, setAutoUpdate, recoverUpdate } from '../lib/updater.mjs';
+import { projectTranscript } from '../lib/viewer-model.mjs';
 
 const ROOT = process.env.DSH_SESSIONS_ROOT || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
 const argv = process.argv.slice(2);
@@ -35,8 +36,9 @@ async function refreshUpdate(changed = () => {}) {
   if (updateInfo.available && !updateInfo.error && readUpdateSettings().autoUpdate) void installUpdate(changed);
 }
 let FULL = flags.has('--full');
-let REASONING = !flags.has('--no-reasoning');
+let REASONING = flags.has('--reasoning') && !flags.has('--no-reasoning');
 let ALL = flags.has('--all');
+let DETAILS = flags.has('--details') || flags.has('--all');
 let W = Math.max(60, Math.min(process.stdout.columns || 100, 140));
 
 // ── styling ────────────────────────────────────────────────────────────────
@@ -46,6 +48,9 @@ const dim = sgr('2'), bold = sgr('1'), ital = sgr('2;3'), red = sgr('91'), green
   yellow = sgr('93'), blue = sgr('94'), magenta = sgr('95'), cyan = sgr('96'), gray = sgr('90');
 
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+const safeText = s => String(s ?? '').replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').replace(/\t/g, '    ');
+const safeLog = value => typeof value === 'string' ? safeText(value) : Array.isArray(value) ? value.map(safeLog)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeLog(item)])) : value;
 const cw = cp => (cp >= 0x1100 && (cp <= 0x115f || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
   (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) ||
   (cp >= 0xffe0 && cp <= 0xffe6) || cp >= 0x1f300)) ? 2 : 1;
@@ -146,7 +151,7 @@ function shortPath(p, cwd) {
 }
 
 function argSummary(name, raw, cwd) {
-  let a; try { a = JSON.parse(raw); } catch { return String(raw ?? ''); }
+  let a; try { a = safeLog(JSON.parse(raw)); } catch { return safeText(raw); }
   if (!a || typeof a !== 'object') return String(raw);
   if (a.command) return String(a.command).split('\n')[0];
   const p = a.file_path || a.path || a.filePath;
@@ -195,6 +200,7 @@ function makeRenderer(finals = new Set()) {
   let lastCall = null, cwd = '', header = null, tools = 0, errors = 0;
 
   return function render(e) {
+    e = safeLog(e);
     const blocks = [];
     let n = 0;
     const add = (lines, full = null) => blocks.push({ key: `${e.seq}:${n++}`, lines, full });
@@ -271,7 +277,7 @@ function makeRenderer(finals = new Set()) {
         const room = body - 6 - width(who);
         const head = blank + '  ' + mark + who + (err ? red(cut(prev, room)) : gray(cut(prev, room)));
         const all = wrap(text, body - 6);
-        const MAXL = 2000;
+        const MAXL = FULL ? Infinity : 2000;
         if (!text.trim() || (all.length <= 1 && width(prev) <= room)) add([head]);
         else add([head], [blank + '  ' + mark + who + gray(`${all.length} 行`),
           ...all.slice(0, MAXL).map(l => blank + '    ' + (err ? red(l) : gray(l))),
@@ -299,6 +305,15 @@ function makeRenderer(finals = new Set()) {
 }
 
 function headerLines(s) {
+  s = safeLog(s);
+  if (INTERACTIVE || (!FULL && !ALL)) {
+    const title = safeText((s.title || s.prompt || '未命名任务').split('【桥接报告约定】')[0]);
+    return [bold(cut(title, W - 4)),
+      gray(safeText(path.basename(s.cwd || '?'))) + '  ' + badge(s.state) + (s.errors ? red(`  ${s.errors} 个错误`) : ''),
+      ...(s.readError ? [red('读取失败：' + cut(s.readError, W - 14))] : []),
+      ...(s.version > 4 ? [yellow('会话格式尚未验证，请更新 dsv。')] : []),
+      ...(s.logComplete === false ? [gray('等待日志尾部写入完成')] : [])];
+  }
   const title = s.title || '(无标题)';
   const bar = '─'.repeat(Math.max(4, W - 2));
   const status = s.state === 'empty' ? badge(s.state) : `${badge(s.state)}${gray(` · ${dur((['active', 'quiet'].includes(s.state) ? Date.now() : s.last) - s.created)} · ${s.tools} 次工具调用`)}${s.errors ? gray(' · ') + red(`${s.errors} 个错误`) : ''}`;
@@ -316,6 +331,54 @@ function headerLines(s) {
   ];
 }
 const printHeader = s => console.log(headerLines(s).join('\n'));
+
+// Reading mode gives the latest answer a stable home; the full event order is
+// available through the process view, with one expandable row per tool.
+function readingBlocks(events, columns, showProcess = DETAILS) {
+  const nodes = projectTranscript(events, { reasoning: REASONING, system: ALL });
+  const final = nodes.findLast(n => n.kind === 'final');
+  const currentTurn = events.findLast(e => e.type === 'turn/start')?.data?.turn;
+  const pending = nodes.filter(n => n.kind === 'question' && n.state === 'pending');
+  const task = nodes.findLast(n => n.kind === 'task');
+  const progress = nodes.slice(final ? nodes.lastIndexOf(final) + 1 : 0).findLast(n => n.kind === 'assistant');
+  let visible = nodes.filter(n => n.kind !== 'title');
+  if (!showProcess) {
+    visible = [...pending, ...(final ? [final] : []), ...(progress ? [progress] : []), ...(task ? [task] : []),
+      ...nodes.filter(n => n.kind === 'error' || n.kind === 'question' && n.state === 'error').slice(-2),
+      ...nodes.filter(n => n.title === '助手附件').slice(-3), ...(REASONING ? nodes.filter(n => n.key.startsWith('reasoning:')).slice(-1) : [])];
+    visible = [...new Map(visible.map(n => [n.key, n])).values()];
+  }
+  const max = Math.max(14, Math.min(76, columns - 4));
+  const blocks = [];
+  const label = node => node.kind === 'final' ? green(bold('结果')) : node.kind === 'question' ? yellow(bold(node.state === 'pending' ? '需要回复' : '问答'))
+    : node.kind === 'task' ? cyan('要求') : node.kind === 'error' ? red('错误') : node.kind === 'assistant' ? bold('进展') : gray(safeText(node.title || '过程'));
+  for (const node of visible) {
+    const text = safeText(node.text), summary = safeText(node.kind === 'question' && node.state === 'pending' ? node.questions || node.summary : node.summary || node.title || text);
+    if (node.kind === 'final') {
+      const state = /^RESULT:\s*(OK|FAIL|BLOCKED)\s*(?:\r?\n|$)/.exec(text);
+      const body = state ? text.slice(state[0].length).trimStart() : text;
+      const heading = state?.[1] === 'BLOCKED' ? yellow(bold('等待补充')) : state?.[1] === 'FAIL' || node.tone === 'error' ? red(bold('未完成'))
+        : currentTurn > node.turn ? gray(bold('上一轮结果')) : label(node);
+      const lines = wrap(body, max).map(line => '  ' + line);
+      blocks.push({ key: node.key, lines: ['', heading, '', ...lines, ''] });
+      continue;
+    }
+    const prominent = node.kind === 'question' && node.state === 'pending';
+    const lead = node.kind === 'tool' ? (node.state === 'pending' ? yellow('… ') : gray('✓ ')) : label(node) + '  ';
+    const preview = wrap(summary, max - 4).slice(0, prominent ? 6 : node.kind === 'error' ? 2 : 1);
+    const lines = prominent ? [label(node), ...preview.map(l => '  ' + l), '']
+      : [lead + (node.kind === 'error' ? red(preview[0] || '') : preview[0] || ''), ...preview.slice(1).map(l => '  ' + l)];
+    const expanded = [label(node), ...wrap(text || summary, max).map(l => '  ' + l)];
+    blocks.push({ key: node.key, lines, full: expanded });
+  }
+  if (!showProcess) {
+    const tools = nodes.filter(n => ['tool', 'error', 'question'].includes(n.kind)).length;
+    const hidden = nodes.filter(n => !visible.includes(n));
+    if (hidden.length) blocks.push({ key: 'process-overview', lines: ['', gray(`过程  ${tools} 次工具操作 · d 查看`)],
+      full: ['', bold('过程摘要'), ...hidden.map(n => '  ' + cut(safeText(n.summary || n.title || n.text), max)), gray('d 打开完整过程，Enter 收起')] });
+  }
+  return blocks;
+}
 
 // ── commands ───────────────────────────────────────────────────────────────
 function resolve(sel) {
@@ -342,8 +405,11 @@ function show(sel) {
   const s = resolve(sel);
   const { events, complete, error } = readEvents(s.file);
   printHeader(summarize({ ...s, logComplete: complete, readError: error }, events));
-  const render = makeRenderer(finalSeqs(events));
-  for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
+  if (!FULL && !ALL) console.log(blocksToText(readingBlocks(events, W)));
+  else {
+    const render = makeRenderer(finalSeqs(events));
+    for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
+  }
   console.log();
 }
 
@@ -364,10 +430,10 @@ function ls(n = 15) {
   console.log('  ' + gray(cols.map(([h, w]) => pad(h, w)).join('') + '任务'));
   console.log('  ' + gray('─'.repeat(fixed + taskW - 2)));
   for (const r of rows) {
-    const proj = path.basename(r.cwd || '') || '?';
+    const proj = safeText(path.basename(r.cwd || '')) || '?';
     const toolsCell = pad(String(r.tools), 4) + (r.errors ? red('!') : ' ') + ' ';
-    console.log('  ' + pad(badge(r.state), 10) + pad(cyan(r.id.slice(0, 8)), 10) + pad(bold(cut(proj, 16)), 18) +
-      pad(gray(toolsCell), 6) + pad(gray(ago(r.mtime)), 13) + cut(r.title, taskW));
+    console.log('  ' + pad(badge(r.state), 10) + pad(cyan(safeText(r.id.slice(0, 8))), 10) + pad(bold(cut(proj, 16)), 18) +
+      pad(gray(toolsCell), 6) + pad(gray(ago(r.mtime)), 13) + cut(safeText(r.title), taskW));
   }
   console.log();
   console.log(gray('  dsv show <ID>  查看过程    dsv watch  实时跟踪    --full 不截断  --no-reasoning 隐藏思考'));
@@ -378,12 +444,21 @@ function ls(n = 15) {
 function watch(sel) {
   const pinned = !!sel && sel !== 'latest';
   let cur = resolve(sel), reader = createEventReader(cur.file), render = makeRenderer(), started = false;
+  const printed = new Map();
+  const printProjected = events => {
+    for (const block of readingBlocks(events, W, true)) {
+      const text = blocksToText([block]);
+      if (text && printed.get(block.key) !== text) { console.log(text); printed.set(block.key, text); }
+    }
+  };
   const begin = () => {
     reader = createEventReader(cur.file);
     const { events, complete, error } = reader.read();
     printHeader(summarize({ ...cur, logComplete: complete, readError: error }, events));
     render = makeRenderer(finalSeqs(events));
-    for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
+    printed.clear();
+    if (!FULL && !ALL) printProjected(events);
+    else for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
   };
   const tick = () => {
     {
@@ -398,8 +473,9 @@ function watch(sel) {
     }
     if (!started) { started = true; begin(); return; }
     let result; try { result = reader.read(); } catch (error) { console.error(red(error.message)); return; }
-    if (result.reset) { render = makeRenderer(finalSeqs(result.events)); console.log(yellow('日志已替换或截短，重新显示。')); }
-    for (const e of result.added) { const r = blocksToText(render(e)); if (r) console.log(r); }
+    if (result.reset) { printed.clear(); render = makeRenderer(finalSeqs(result.events)); console.log(yellow('日志已替换或截短，重新显示。')); }
+    if (!FULL && !ALL) printProjected(result.events);
+    else for (const e of result.added) { const r = blocksToText(render(e)); if (r) console.log(r); }
   };
   console.log(gray(`  实时跟踪中 · Ctrl+C 退出${pinned ? '' : ' · 有新会话会自动切换'}\n`));
   tick();
@@ -413,17 +489,16 @@ function tui() {
   INTERACTIVE = true;
   const out = process.stdout, inp = process.stdin;
   const ESC = '\x1b[';
-  const SEL_BG = '\x1b[48;5;236m', BAR_BG = '\x1b[48;5;24m\x1b[97m';
-  const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  const SEL_BG = '\x1b[48;5;236m', BAR_BG = '\x1b[0m';
   const MAX_SESSIONS = 60;
 
   const cache = new Map();
   const CACHE_BYTES = 64 * 1024 * 1024;
   let sessions = [];          // summaries, newest first
-  let selId = null, autoPick = true;
-  let focus = 'list', view = 'list';           // view is only used in narrow mode
-  let listTop = 0, scroll = 0, cursor = 0, follow = true;
-  let flash = null, frame = 0, lastFrame = '', bell = true;
+  let selId = null, autoPick = false;
+  let focus = 'detail', view = 'detail';
+  let listTop = 0, scroll = 0, cursor = 0, follow = false;
+  let flash = null, frame = 0, lastFrame = '', bell = false, help = false, info = false;
   let footButtons = [];       // [{ x0, x1, run }] 1-based columns of the bottom menu bar
   let shown = { lines: [], keys: [], h: 1, c: null }; // what the detail pane last drew
   const prevState = new Map();
@@ -441,8 +516,7 @@ function tui() {
     c.events = events; c.retainedBytes = result.retainedBytes;
     if (reset) { c.blocks = null; c.open.clear(); }
     if (added.length) {
-      if (added.some(e => e.type === 'turn/end')) c.blocks = null;
-      else if (c.blocks) { setWidth(c.width); for (const e of added) c.blocks.push(...c.render(e)); }
+      c.blocks = null;
       c.sum = null;
     }
     if (!c.sum || c.sum.mtime !== s.mtime || c.sum.logComplete !== result.complete) {
@@ -454,13 +528,14 @@ function tui() {
   // Flatten a session's blocks into display lines, honoring which blocks are expanded.
   function linesFor(c, w) {
     if (!c.blocks || c.width !== w) {
-      setWidth(w);
+      setWidth(Math.min(w, 84));
       c.width = w;
-      c.render = makeRenderer(finalSeqs(c.events));
-      c.blocks = c.events.flatMap(e => c.render(e));
+      c.blocks = readingBlocks(c.events, w);
     }
-    setWidth(w);
-    const lines = [...headerLines(c.sum), ''], keys = lines.map(() => null);
+    setWidth(Math.min(w, 84));
+    const meta = info ? [gray(cut(safeText(c.sum.cwd), w)), gray(`ID ${safeText(c.sum.id)}  v${c.sum.version}`),
+      gray(`输入 ${c.sum.usage?.tokens?.uncachedInputTokens ?? '?'}  输出 ${c.sum.usage?.tokens?.outputTokens ?? '?'}  工具 ${c.sum.tools}`)] : [];
+    const lines = [...headerLines(c.sum), ...meta, ''], keys = lines.map(() => null);
     for (const b of c.blocks) {
       const ls = b.full && FULL ? b.full.filter(l => !stripAnsi(l).trimEnd().endsWith('▴ 点击收起'))
         : b.full && c.open.has(b.key) ? b.full : b.lines;
@@ -488,8 +563,8 @@ function tui() {
     for (const s of sessions) {
       const before = prevState.get(s.id);
       if (['active', 'quiet'].includes(before) && !['active', 'quiet', 'empty'].includes(s.state)) {
-        const proj = path.basename(s.cwd || '');
-        flash = { until: Date.now() + 8000, text: s.state === 'done' ? green(`✓ ${s.id.slice(0, 8)} ${proj} 会话已结束`) : red(`✗ ${s.id.slice(0, 8)} ${proj} ${stripAnsi(badge(s.state))}`) };
+        const proj = safeText(path.basename(s.cwd || '')), id = safeText(s.id.slice(0, 8));
+        flash = { until: Date.now() + 8000, text: s.state === 'done' ? green(`✓ ${id} ${proj} 会话已结束`) : red(`✗ ${id} ${proj} ${stripAnsi(badge(s.state))}`) };
         if (bell) out.write('\x07');
       }
       prevState.set(s.id, s.state);
@@ -498,7 +573,7 @@ function tui() {
       const pick = sessions.find(s => s.state === 'active') || sessions[0];
       if (pick.id !== selId) select(pick.id);
     }
-    if (!sessions.find(s => s.id === selId)) selId = sessions[0]?.id ?? null;
+    if (!sessions.find(s => s.id === selId)) selId = (sessions.find(s => s.state === 'active') || sessions[0])?.id ?? null;
   }
 
   // Remember scroll position per session so switching back and forth doesn't lose your place.
@@ -508,7 +583,7 @@ function tui() {
     selId = id;
     const s = sessions.find(x => x.id === id);
     const v = s && cache.get(s.file)?.view;
-    if (v) ({ scroll, cursor, follow } = v); else { follow = true; }
+    if (v) ({ scroll, cursor, follow } = v); else { scroll = 0; cursor = 0; follow = false; }
   }
 
   // Truncate/pad a string containing ANSI codes to exactly w columns.
@@ -526,36 +601,35 @@ function tui() {
     return o + ' '.repeat(Math.max(0, w - n)) + '\x1b[0m';
   }
 
-  const icon = s => s.state === 'active' ? yellow(SPIN[frame % SPIN.length]) : s.state === 'done' ? green('✓')
+  const icon = s => s.state === 'active' ? cyan('●') : s.state === 'done' ? gray('✓')
     : s.state === 'quiet' ? yellow('◌') : s.state === 'empty' ? gray('·') : red('✗');
 
   function listRows(w, h) {
     const rows = [];
     const idx = Math.max(0, sessions.findIndex(s => s.id === selId));
-    const per = 2, fitN = Math.max(1, Math.floor(h / per));
+    const per = 3, fitN = Math.max(1, Math.floor((h - 2) / per));
+    rows.push(fit(gray('  最近任务'), w), ' '.repeat(w));
     if (idx < listTop) listTop = idx;
     if (idx >= listTop + fitN) listTop = idx - fitN + 1;
     for (let i = listTop; i < Math.min(sessions.length, listTop + fitN); i++) {
       const s = sessions[i], sel = s.id === selId;
       const bg = sel ? SEL_BG : '';
       const mark = sel ? (focus === 'list' ? cyan('▌') : gray('▌')) : ' ';
-      const right = gray(ago(s.mtime));
-      const left = `${mark}${icon(s)} ${cyan(s.id.slice(0, 8))} ${bold(cut(path.basename(s.cwd || '?'), w - 26))}`;
-      rows.push(fit(left + ' '.repeat(Math.max(1, w - width(left) - width(right) - 1)) + right, w, bg));
-      const tools = gray(`${s.tools} 次`) + (s.errors ? red(` ${s.errors}!`) : '');
-      const t2 = `${mark}  ${gray(cut(s.title || '(空)', w - width(tools) - 6))}`;
-      rows.push(fit(t2 + ' '.repeat(Math.max(1, w - width(t2) - width(tools) - 1)) + tools, w, bg));
+      const title = safeText((s.title || s.prompt || '未命名任务').split('【桥接报告约定】')[0]);
+      rows.push(fit(`${mark} ${icon(s)} ${sel ? bold(cut(title, w - 5)) : cut(title, w - 5)}`, w, bg));
+      rows.push(fit(`${mark}   ${gray(cut(safeText(path.basename(s.cwd || '?')), w - 18))}  ${gray(ago(s.mtime))}${s.errors ? red(' !') : ''}`, w, bg));
+      rows.push(' '.repeat(w));
     }
-    if (!sessions.length) rows.push(fit(gray('  还没有 DeepSeek 会话'), w));
+    if (!sessions.length) rows.push(fit(gray('  还没有会话'), w), fit(gray('  完成一次 dsb 任务后会显示在这里'), w));
     while (rows.length < h) rows.push(' '.repeat(w));
-    return rows;
+    return rows.slice(0, h);
   }
 
-  const inDetail = () => (out.columns || 100) >= 110 ? focus === 'detail' : view === 'detail';
+  const inDetail = () => (out.columns || 100) >= 100 ? focus === 'detail' : view === 'detail';
 
   function detailRows(w, h) {
     const s = sessions.find(x => x.id === selId);
-    if (!s) return Array.from({ length: h }, () => ' '.repeat(w));
+    if (!s) return [fit(bold('任务与结果会显示在这里'), w), '', fit(gray('先运行 dsb run，再回来查看。'), w), ...Array.from({ length: Math.max(0, h - 3) }, () => ' '.repeat(w))];
     if (!cache.has(s.file)) load(s);
     const c = cache.get(s.file);
     const { lines, keys } = linesFor(c, w - 3);
@@ -568,10 +642,14 @@ function tui() {
     const barTop = Math.round((h - barH) * (maxTop ? scroll / maxTop : 0));
     const curKey = keys[cursor];
     const rows = [];
+    if (help) {
+      const notes = ['阅读方式', '', 'Tab  切换任务列表与正文', 'Enter  展开或收起当前内容', 'd  阅读结果 / 查看过程', 'r  显示思考', 'i  查看路径、ID和用量', 'f  展开全部内容', 'G  到底部并跟随', 'a  自动切换有更新的会话', 'u  检查并安装更新', 'b  完成提示音', '', '?  关闭帮助    q  退出'];
+      return Array.from({ length: h }, (_, i) => fit(i === 0 ? bold(notes[i] || '') : gray(notes[i] || ''), w));
+    }
     for (let i = 0; i < h; i++) {
       const idx = scroll + i, l = lines[idx];
       const bar = lines.length <= h ? ' ' : (i >= barTop && i < barTop + barH ? cyan('┃') : gray('│'));
-      const onCursor = inDetail() && idx === cursor;
+      const onCursor = inDetail() && idx === cursor && !!keys[idx];
       const inBlock = inDetail() && curKey && keys[idx] === curKey;   // highlight the whole foldable block
       const lead = onCursor ? cyan('▌') : inBlock ? gray('▏') : ' ';
       rows.push(fit(l === undefined ? '' : lead + l, w - 1, onCursor ? SEL_BG : '') + bar);
@@ -582,21 +660,21 @@ function tui() {
   function draw() {
     frame++;
     const cols = out.columns || 100, rowsN = out.rows || 30;
-    const split = cols >= 110;
+    const split = cols >= 100;
     const bodyH = rowsN - 2;
     const running = sessions.filter(s => s.state === 'active').length;
-    const title = ` ${bold('dpsk-bridge')} ${gray(PACKAGE.version)}  ${running ? yellow(`${SPIN[frame % SPIN.length]} ${running} 个最近有更新`) : gray(`· ${sessions.length} 个会话`)}`;
+    const title = ` ${bold('dsv')}  ${gray(DETAILS ? '过程' : '阅读')}  ${running ? cyan(`${running} 个会话有更新`) : ''}`;
     let status = '';
-    if (!follow && inDetail()) status = yellow('⏸ 暂停跟随 · G 回到底部') + '   ';
+    if (DETAILS && !follow && inDetail()) status = gray('G 跟随最新内容') + '   ';
     if (flash && Date.now() < flash.until) status = bold(flash.text) + '   ';
     if (updateMessage) status = yellow(cut(updateMessage, Math.max(20, cols - width(title) - 14))) + ' ';
     else if (updateInfo?.available) status = yellow(`新版本 ${updateInfo.latest} · u 更新`) + ' ';
-    const clockStr = status + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' ';
+    const clockStr = status || gray(`v${PACKAGE.version}  `);
     const top = fit(title + ' '.repeat(Math.max(1, cols - width(title) - width(clockStr))) + clockStr, cols, BAR_BG);
 
     let bodyRows;
     if (split) {
-      const L = Math.min(52, Math.max(40, Math.floor(cols * 0.32)));
+      const L = Math.min(34, Math.max(28, Math.floor(cols * 0.25)));
       const left = listRows(L, bodyH), right = detailRows(cols - L - 1, bodyH);
       const sep = focus === 'detail' ? cyan('│') : gray('│');
       bodyRows = left.map((l, i) => l + sep + right[i]);
@@ -615,27 +693,23 @@ function tui() {
     { key: '1', alt: 'a', label: '自动跟随', get: () => autoPick, run: () => { autoPick = !autoPick; if (autoPick) refresh(); } },
     { key: '2', alt: 'r', label: '思考', get: () => REASONING, run: () => { REASONING = !REASONING; invalidate(); } },
     { key: '3', alt: 'f', label: '全部展开', get: () => FULL, run: () => { FULL = !FULL; invalidate(); } },
-    { key: '4', alt: 's', label: '系统消息', get: () => ALL, run: () => { ALL = !ALL; invalidate(); } },
+    { key: '4', alt: 's', label: '系统消息', get: () => ALL, run: () => { ALL = !ALL; if (ALL) DETAILS = true; invalidate(); } },
     { key: '5', alt: 'b', label: '提示音', get: () => bell, run: () => { bell = !bell; } },
   ];
-  const KEY_BG = '\x1b[0;1;97;48;5;24m', ON_BG = '\x1b[0;97;48;5;29m', OFF_BG = '\x1b[0;37;48;5;238m', QUIT_BG = '\x1b[0;97;48;5;52m', RST = '\x1b[0m';
   function footer(cols) {
     footButtons = [];
     let s = '', x = 1;
-    const button = (keyLabel, text, bg, run) => {
-      const w = width(` ${keyLabel}  ${text} `);
+    const button = (keyLabel, text, run) => {
+      const w = width(` ${keyLabel} ${text} `);
       footButtons.push({ x0: x, x1: x + w - 1, run });
-      s += `${KEY_BG} ${keyLabel} ${bg} ${text} ${RST} `;
-      x += w + 1;
+      s += ` ${bold(keyLabel)} ${gray(text)} `;
+      x += w;
     };
-    for (const t of TOGGLES) button(t.key, `${t.get() ? '●' : '○'} ${t.label}`, t.get() ? ON_BG : OFF_BG, t.run);
-    if (cols >= 110) button('u', updateTask ? '更新中' : '更新', OFF_BG, () => { void installUpdate(draw); });
-    const hint = gray(inDetail() ? '↑↓ 移动 · Enter/点击 展开 · Esc 返回' : '↑↓ 选择 · Enter 进入');
-    const quitW = width(' q  退出 ');
-    const gap = cols - (x - 1) - width(hint) - quitW - 2;
-    if (gap >= 1) { s += ' '.repeat(gap) + hint + ' '; x += gap + width(hint) + 1; }
-    else { const g2 = Math.max(1, cols - (x - 1) - quitW - 1); s += ' '.repeat(g2); x += g2; }
-    button('q', '退出', QUIT_BG, quit);
+    const actions = [['Tab', '切换', () => onKey('\t')], ['Enter', '展开', () => toggle(cursor)], ['d', DETAILS ? '阅读' : '过程', () => onKey('d')], ['?', '帮助', () => onKey('?')]];
+    if (updateInfo?.available || updateTask) actions.push(['u', updateTask ? '更新中' : '更新', () => { void installUpdate(draw); }]);
+    for (const [key, text, run] of actions) if (x + width(` ${key} ${text} `) + 10 < cols) button(key, text, run);
+    const gap = Math.max(1, cols - x - width(' q 退出 ')); s += ' '.repeat(gap); x += gap;
+    button('q', '退出', quit);
     return fit(s, cols);
   }
 
@@ -680,6 +754,9 @@ function tui() {
   function onKey(k) {
     if (k === 'q' || k === '\x03') return quit();
     if (k === 'u') { void installUpdate(draw); return; }
+    if (k === '?') { help = !help; draw(); return; }
+    if (k === 'i') { info = !info; lastFrame = ''; draw(); return; }
+    if (k === 'd') { DETAILS = !DETAILS; scroll = 0; cursor = 0; follow = false; invalidate(); draw(); return; }
     const t = TOGGLES.find(t => k === t.key || k === t.alt);
     if (t) t.run();
     else if (k === '\t') { focus = focus === 'list' ? 'detail' : 'list'; view = view === 'list' ? 'detail' : 'list'; }
@@ -707,8 +784,8 @@ function tui() {
   }
 
   function onMouse(btn, x, y, press) {
-    const cols = out.columns || 100, split = cols >= 110;
-    const L = Math.min(52, Math.max(40, Math.floor(cols * 0.32)));
+    const cols = out.columns || 100, split = cols >= 100;
+    const L = Math.min(34, Math.max(28, Math.floor(cols * 0.25)));
     const overList = split ? x <= L : view === 'list';
     if (btn === 0 && press && y === (out.rows || 30)) {
       const b = footButtons.find(b => x >= b.x0 && x <= b.x1);
@@ -718,11 +795,13 @@ function tui() {
       if (overList) move(Math.sign(d)); else scrollBy(d);
     } else if (btn === 0 && press && y >= 2 && y <= (out.rows || 30) - 1) {
       if (overList) {
-        const i = listTop + Math.floor((y - 2) / 2);
+        const i = listTop + Math.floor((y - 4) / 3);
+        if (y < 4) return;
         if (sessions[i]) {
-          if (selId === sessions[i].id && !split) view = 'detail';
+          const openDetail = selId === sessions[i].id && !split;
+          if (openDetail) view = 'detail';
           if (selId !== sessions[i].id) select(sessions[i].id);
-          autoPick = false; focus = 'list';
+          autoPick = false; focus = openDetail ? 'detail' : 'list';
         }
       } else {
         focus = 'detail';
@@ -783,4 +862,4 @@ else if ((!cmd || cmd === 'tui') && process.stdout.isTTY && process.stdin.isTTY)
 else if (!cmd || cmd === 'ls' || /^\d+$/.test(cmd)) ls(Number(/^\d+$/.test(cmd) ? cmd : a1) || 15);
 else if (cmd === 'show' || cmd === 's') show(a1);
 else if (cmd === 'watch' || cmd === 'w') watch(a1);
-else console.log(`用法:\n  dsv [N]              最近 N 个会话\n  dsv show [ID|latest] 查看会话过程\n  dsv watch [ID]       实时跟踪\n  dsv update          检查并安装正式更新\n  dsv update --check  仅检查更新\n  dsv update --auto on|off  开关自动更新（默认关）\n  dsv update --recover --confirmed-stopped  确认旧进程退出后恢复更新预约\n选项: --full  --no-reasoning  --all  --no-update-check  --version`);
+else console.log(`用法:\n  dsv [N]              最近 N 个会话\n  dsv show [ID|latest] 查看会话过程\n  dsv watch [ID]       实时跟踪\n  dsv update          检查并安装正式更新\n  dsv update --check  仅检查更新\n  dsv update --auto on|off  开关自动更新（默认关）\n  dsv update --recover --confirmed-stopped  确认旧进程退出后恢复更新预约\n选项: --details  --full  --reasoning  --all  --no-update-check  --version`);

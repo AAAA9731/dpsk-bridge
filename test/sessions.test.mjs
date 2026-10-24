@@ -182,6 +182,6 @@ test('CLI reads current compressed sessions from a configured root', t => {
   const rows = [header(), event('user/message', { source: { kind: 'user' }, content: text('current prompt') }),
     event('tool/result', { message: { role: 'tool', toolCallId: 'call', content: text('current tool output') } }, 2)];
   write(root, 'project/session-current/session.v4.jsonl.zstd', zlib.zstdCompressSync(jsonl(rows)));
-  const result = spawnSync(process.execPath, [cli, 'show', 'current'], { encoding: 'utf8', env: { ...process.env, DSH_SESSIONS_ROOT: root } });
+  const result = spawnSync(process.execPath, [cli, 'show', 'current', '--full'], { encoding: 'utf8', env: { ...process.env, DSH_SESSIONS_ROOT: root } });
   assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /current prompt/); assert.match(result.stdout, /current tool output/);
 });

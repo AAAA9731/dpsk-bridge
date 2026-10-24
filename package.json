@@ -23,7 +23,7 @@
     "node": ">=24.9"
   },
   "scripts": {
-    "check": "node --check bin/dsv.mjs && node --check bin/dsb.mjs && node --check lib/bridge.mjs && node --check lib/sessions.mjs && node --check lib/live.mjs && node --check lib/sdk.mjs && node --check lib/scheduler.mjs && node --check lib/host-plugin.mjs && node --check lib/updater.mjs && node --check scripts/sync-skills.mjs",
+    "check": "node --check bin/dsv.mjs && node --check bin/dsb.mjs && node --check lib/bridge.mjs && node --check lib/sessions.mjs && node --check lib/live.mjs && node --check lib/sdk.mjs && node --check lib/scheduler.mjs && node --check lib/host-plugin.mjs && node --check lib/updater.mjs && node --check lib/viewer-model.mjs && node --check scripts/sync-skills.mjs",
     "test": "node --test",
     "sync-skills": "node scripts/sync-skills.mjs"
   },

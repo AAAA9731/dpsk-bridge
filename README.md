@@ -81,7 +81,9 @@ scope、只读与资源声明是协作约定，不是文件系统沙箱。原有
 ```text
 dsv                         全屏 TUI
 dsv ls [N]                  最近会话
-dsv show <ID|latest> --full  查看过程
+dsv show <ID|latest>         结果优先的阅读视图
+dsv show <ID> --details     按时间查看过程
+dsv show <ID> --full        完整原始过程
 dsv watch [ID]              实时跟踪
 dsv --version
 dsv update --check          立即检查，不安装
@@ -92,7 +94,11 @@ dsv update --auto off       关闭自动更新（默认）
 
 dsv 读取当前 v4 明文/zstd 日志，增量处理残缺尾部、原生工具结果、system/developer 消息、结构化错误和用量。最高 generation 优先，未来格式提示未验证。DSH_SESSIONS_ROOT 可指定日志目录。
 
-TUI 用方向键或 j/k 选择，Enter/Tab 进入内容，Enter/空格展开，Esc 返回，PgUp/PgDn 翻页，g/G 到顶/底，e/E 全部展开/收起。1–5 切换跟随、思考、展开、系统消息和提示音，q 退出。日志状态不证明进程存活或验收结果。缓存最多 60 个会话，单会话 16 MiB/3 万事件，总解码缓存 64 MiB，超过限制会提示。
+![dsv 阅读视图（示例会话，通过实际 TUI 渲染）](docs/dsv-reading.png)
+
+默认阅读视图先显示待回复问题和最新结果，任务原文可展开，工具流水汇成一行；思考、成功输出、时间戳和用量不占正文。按 d 切换完整过程，工具调用与返回合成一条可展开记录，计划更新按轮次汇总。新会话不会自动切走当前任务。
+
+Tab 在任务列表与正文间切换，方向键或 j/k 移动，Enter/空格展开，Esc 返回列表，PgUp/PgDn 翻页，g/G 到顶/底，e/E 全部展开/收起。r 显示思考，i 查看路径/ID/用量，? 查看帮助，q 退出。自动切换(a)和提示音(b)默认关闭，可按需开启。窄窗口直接显示正文。日志状态不证明进程存活或验收结果。缓存最多 60 个会话，单会话 16 MiB/3 万事件，总解码缓存 64 MiB，超过限制会提示。
 
 TUI 异步检查 GitHub 最新正式 Release，缓存 6 小时，常驻时每小时重新评估。发现更新后顶栏提示，按 u 安装。网络检查失败不影响查看；普通命令行查看不联网检查。设置 NO_UPDATE_NOTIFIER=1、CI 环境或 --no-update-check 可关闭 TUI 自动检查，显式 dsv update 仍可用。
 
