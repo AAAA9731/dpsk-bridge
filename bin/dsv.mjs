@@ -4,15 +4,36 @@
 //   dsv show [id|latest]    print one session's transcript
 //   dsv watch [id]          live-follow a session (default: newest, auto-switches to newer ones)
 // Flags: --full (no truncation)  --no-reasoning  --all (show injected system/runtime messages)
-import fs from 'node:fs';
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
-import { decodeFrom, sessionState, collectUsage } from '../lib/sessions.mjs';
+import { readEvents, createEventReader, listSessionFiles, sessionState, collectUsage } from '../lib/sessions.mjs';
+import { checkForUpdate, applyUpdate, readUpdateSettings, setAutoUpdate, recoverUpdate } from '../lib/updater.mjs';
 
-const ROOT = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
+const ROOT = process.env.DSH_SESSIONS_ROOT || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter(a => a.startsWith('--')));
 const args = argv.filter(a => !a.startsWith('--'));
+const PACKAGE = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+let updateInfo = null, updateTask = null, updateMessage = '', updateApplied = false;
+async function installUpdate(changed = () => {}) {
+  if (updateTask || updateApplied) return;
+  updateTask = (async () => {
+    try {
+      const info = await checkForUpdate({ force: true }); updateInfo = info;
+      if (!info.available) { updateMessage = info.error ? `检查更新失败：${info.error}` : '当前已是最新正式版本'; changed(); return; }
+      const applied = await applyUpdate(info, { onProgress: message => { updateMessage = message; changed(); } });
+      updateApplied = true; updateMessage = `已更新至 ${applied.version}，重开 dsv 生效`; changed();
+    } catch (error) { updateMessage = `更新暂停：${error.message}`; changed(); }
+    finally { updateTask = null; changed(); }
+  })();
+  return updateTask;
+}
+async function refreshUpdate(changed = () => {}) {
+  if (process.env.CI || process.env.NO_UPDATE_NOTIFIER || flags.has('--no-update-check') || updateApplied) return;
+  updateInfo = await checkForUpdate(); changed();
+  if (updateInfo.available && !updateInfo.error && readUpdateSettings().autoUpdate) void installUpdate(changed);
+}
 let FULL = flags.has('--full');
 let REASONING = !flags.has('--no-reasoning');
 let ALL = flags.has('--all');
@@ -78,23 +99,15 @@ const dur = ms => {
 
 // ── session files ──────────────────────────────────────────────────────────
 function listSessions() {
-  const out = [];
-  if (!fs.existsSync(ROOT)) return out;
-  for (const proj of fs.readdirSync(ROOT)) {
-    const pdir = path.join(ROOT, proj);
-    let entries; try { entries = fs.readdirSync(pdir); } catch { continue; }
-    for (const s of entries) {
-      const file = path.join(pdir, s, 'session.v3.jsonl.zstd');
-      try { out.push({ id: s.replace(/^session-/, ''), file, mtime: fs.statSync(file).mtimeMs }); } catch {}
-    }
-  }
-  return out.sort((a, b) => b.mtime - a.mtime);
+  return listSessionFiles(ROOT);
 }
 
 const textOf = content => (Array.isArray(content) ? content : [])
-  .map(p => p.type === 'text' ? p.text : p.type === 'tool-result' ? textOf(p.content) : '').join('');
+  .map(p => p.type === 'text' ? p.text : '').join('');
 
-function summarize(s, events = decodeFrom(fs.readFileSync(s.file)).events) {
+const toolResult = message => message?.role === 'tool' ? message : undefined;
+
+function summarize(s, events = readEvents(s.file).events) {
   let cwd = '', title = '', prompt = '', open = 0, lastEnd = null, tools = 0, errors = 0, created = s.mtime, last = s.mtime;
   for (const e of events) {
     if (e.time) last = e.time;
@@ -102,12 +115,12 @@ function summarize(s, events = decodeFrom(fs.readFileSync(s.file)).events) {
     else if (e.type === 'session/title') title = e.data.title;
     else if (e.type === 'user/message' && !prompt && e.data?.source?.kind === 'user') prompt = textOf(e.data.content);
     else if (e.type === 'turn/start') open++;
-    else if (e.type === 'turn/end') { open--; lastEnd = e.data.reason?.kind; }
+    else if (e.type === 'turn/end') { open = Math.max(0, open - 1); lastEnd = e.data.reason?.kind; }
     else if (e.type === 'tool/call') tools++;
-    else if (e.type === 'tool/result' && e.data?.message?.content?.some(p => p.isError)) errors++;
+    else if (e.type === 'tool/result' && toolResult(e.data?.message)?.isError) errors++;
   }
   const state = sessionState(open, lastEnd, s.mtime);
-  return { ...s, cwd, title: title || prompt, prompt, created, last, state, tools, errors, usage: collectUsage(events) };
+  return { ...s, cwd, title: title || prompt, prompt, created, last, state, openTurns: open, lastEnd, tools, errors, usage: collectUsage(events) };
 }
 
 const BADGE = {
@@ -216,7 +229,8 @@ function makeRenderer(finals = new Set()) {
         break;
       }
       case 'system/message':
-        if (ALL) add([gutter(e.time) + gray('[system] ' + cut(textOf(d.content), body - 10))]);
+      case 'developer/message':
+        if (ALL) add([gutter(e.time) + gray(`[${e.type.split('/')[0]}] ` + cut(textOf(d.message?.content || d.content), body - 10))]);
         break;
       case 'assistant/message':
         for (const p of d.message?.content || []) {
@@ -246,7 +260,7 @@ function makeRenderer(finals = new Set()) {
         break;
       }
       case 'tool/result': {
-        const r = (d.message?.content || []).find(p => p.type === 'tool-result');
+        const r = toolResult(d.message);
         const id = r?.toolCallId;
         const err = r?.isError;
         if (err) errors++;
@@ -270,9 +284,15 @@ function makeRenderer(finals = new Set()) {
         const k = d.reason?.kind;
         const took = header ? dur(e.time - header.createdAt) : '';
         const stats = gray(`  ${took} · ${tools} 次工具调用${errors ? ' · ' : ''}`) + (errors ? red(`${errors} 个错误`) : '');
-        add(['', (k === 'completed' ? green('■ 会话结束（待任务验收）') : red(`■ ${k}`)) + stats, ...(d.reason?.message ? [red('  ' + d.reason.message)] : [])]);
+        const error = d.reason?.error?.message || d.reason?.message;
+        add(['', (k === 'completed' ? green('■ 会话结束（待任务验收）') : red(`■ ${k}`)) + stats, ...(error ? [red('  ' + error)] : [])]);
         break;
       }
+      case 'assistant/attempt':
+        add([gutter(e.time) + yellow('◇ 模型尝试结束，未提交消息')]);
+        break;
+      default:
+        if (ALL && e.type !== 'session') add([gutter(e.time) + gray(`[${e.type}] ` + cut(JSON.stringify(d), body - 10))]);
     }
     return blocks;
   };
@@ -286,8 +306,11 @@ function headerLines(s) {
     gray('╭' + bar),
     gray('│ ') + bold(cut(title, W - 4)),
     gray('│ ') + gray('项目 ') + pad(path.basename(s.cwd || '?'), 20) + gray(cut(s.cwd, Math.max(10, W - 30))),
-    gray('│ ') + gray('会话 ') + cyan(s.id.slice(0, 8)) + gray(`  开始 ${when(s.created)}  `) + status,
-    gray('│ ') + gray(cut(s.usage?.available ? `会话用量：输入 ${s.usage.tokens.uncachedInputTokens} · 输出 ${s.usage.tokens.outputTokens} · 缓存读 ${s.usage.tokens.cacheReadTokens} · 缓存写 ${s.usage.tokens.cacheWriteTokens}${s.usage.missingSamples ? ' · 样本不完整' : ''}` : '会话用量：不可用（不视为零）', W - 4)),
+    gray('│ ') + gray('会话 ') + cyan(s.id.slice(0, 8)) + gray(`  格式 v${s.version ?? '?'}  开始 ${when(s.created)}  `) + status,
+    ...(s.version > 4 ? [yellow('│ 此格式尚未验证，当前仅展示能识别的日志记录。')] : []),
+    gray('│ ') + gray(cut(s.usage?.available ? `会话用量：输入 ${s.usage.tokens.uncachedInputTokens ?? '?'} · 输出 ${s.usage.tokens.outputTokens ?? '?'} · 缓存读 ${s.usage.tokens.cacheReadTokens ?? '?'} · 缓存写 ${s.usage.tokens.cacheWriteTokens ?? '?'}${s.usage.missingSamples ? ' · 样本不完整' : ''}` : '会话用量：不可用（不视为零）', W - 4)),
+    ...(s.logComplete === false ? [yellow('│ 日志含未完成尾部或无法解析的记录，当前显示完整前缀。')] : []),
+    ...(s.readError ? [red('│ 日志读取失败：' + cut(s.readError, W - 20))] : []),
     ...(['active', 'quiet'].includes(s.state) ? [gray('│ ') + gray(cut('日志状态不能证明进程存活；桥接任务请用 dsb status 核对。', W - 4))] : []),
     gray('╰' + bar),
   ];
@@ -317,8 +340,8 @@ function finalSeqs(events) {
 
 function show(sel) {
   const s = resolve(sel);
-  const { events } = decodeFrom(fs.readFileSync(s.file));
-  printHeader(summarize(s, events));
+  const { events, complete, error } = readEvents(s.file);
+  printHeader(summarize({ ...s, logComplete: complete, readError: error }, events));
   const render = makeRenderer(finalSeqs(events));
   for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
   console.log();
@@ -326,7 +349,10 @@ function show(sel) {
 
 function ls(n = 15) {
   const all = listSessions();
-  const rows = all.slice(0, n).map(s => summarize(s));
+  const rows = all.slice(0, n).map(s => {
+    try { return summarize(s); }
+    catch (error) { return { ...summarize(s, []), title: `读取失败：${error.message}`, state: 'unreadable' }; }
+  });
   if (!rows.length) return console.log(gray('还没有任何 DeepSeek 会话。'));
   const running = rows.filter(r => r.state === 'active').length;
   console.log();
@@ -351,18 +377,18 @@ function ls(n = 15) {
 
 function watch(sel) {
   const pinned = !!sel && sel !== 'latest';
-  let cur = resolve(sel), offset = 0, render = makeRenderer(), started = false;
+  let cur = resolve(sel), reader = createEventReader(cur.file), render = makeRenderer(), started = false;
   const begin = () => {
-    const buf = fs.readFileSync(cur.file);
-    const { events, end } = decodeFrom(buf);
-    printHeader(summarize(cur, events));
+    reader = createEventReader(cur.file);
+    const { events, complete, error } = reader.read();
+    printHeader(summarize({ ...cur, logComplete: complete, readError: error }, events));
     render = makeRenderer(finalSeqs(events));
     for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
-    offset = end;
   };
   const tick = () => {
-    if (!pinned) {
-      const newest = listSessions()[0];
+    {
+      const all = listSessions();
+      const newest = pinned ? all.find(s => s.id === cur.id) : all[0];
       if (newest && newest.file !== cur.file) {
         cur = newest;
         console.log('\n' + magenta(bold(`  ⇢ 新会话开始了，切换过去 `)) + gray(cur.id.slice(0, 8)) + '\n');
@@ -371,11 +397,9 @@ function watch(sel) {
       }
     }
     if (!started) { started = true; begin(); return; }
-    let buf; try { buf = fs.readFileSync(cur.file); } catch { return; }
-    if (buf.length <= offset) return;
-    const { events, end } = decodeFrom(buf, offset);
-    offset = end;
-    for (const e of events) { const r = blocksToText(render(e)); if (r) console.log(r); }
+    let result; try { result = reader.read(); } catch (error) { console.error(red(error.message)); return; }
+    if (result.reset) { render = makeRenderer(finalSeqs(result.events)); console.log(yellow('日志已替换或截短，重新显示。')); }
+    for (const e of result.added) { const r = blocksToText(render(e)); if (r) console.log(r); }
   };
   console.log(gray(`  实时跟踪中 · Ctrl+C 退出${pinned ? '' : ' · 有新会话会自动切换'}\n`));
   tick();
@@ -393,7 +417,8 @@ function tui() {
   const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
   const MAX_SESSIONS = 60;
 
-  const cache = new Map();   // file -> { size, offset, events, sum, blocks, render, width, open, view }
+  const cache = new Map();
+  const CACHE_BYTES = 64 * 1024 * 1024;
   let sessions = [];          // summaries, newest first
   let selId = null, autoPick = true;
   let focus = 'list', view = 'list';           // view is only used in narrow mode
@@ -405,20 +430,24 @@ function tui() {
 
   function load(s) {
     let c = cache.get(s.file);
-    let size; try { size = fs.statSync(s.file).size; } catch { return c?.sum; }
-    if (!c) { c = { size: -1, offset: 0, events: [], blocks: null, open: new Set() }; cache.set(s.file, c); }
-    if (size !== c.size) {
-      const buf = fs.readFileSync(s.file);
-      if (buf.length < c.offset) { c.offset = 0; c.events = []; c.blocks = null; c.open.clear(); }
-      const { events, end } = decodeFrom(buf, c.offset);
-      c.offset = end; c.size = size;
-      if (events.length) {
-        c.events.push(...events);
-        if (events.some(e => e.type === 'turn/end')) c.blocks = null; // final answers change: re-render
-        else if (c.blocks) { setWidth(c.width); for (const e of events) c.blocks.push(...c.render(e)); }
-      }
+    if (!c) {
+      c = { reader: createEventReader(s.file, { maxBytes: 16 * 1024 * 1024, maxEvents: 30_000 }), events: [], blocks: null, open: new Set(), retainedBytes: 0 };
+      cache.set(s.file, c);
     }
-    c.sum = summarize(s, c.events);
+    let result;
+    try { result = c.reader.read(); }
+    catch (error) { c.sum = { ...summarize(s, c.events), state: 'unreadable', readError: error.message }; return c.sum; }
+    const { events, added, reset } = result;
+    c.events = events; c.retainedBytes = result.retainedBytes;
+    if (reset) { c.blocks = null; c.open.clear(); }
+    if (added.length) {
+      if (added.some(e => e.type === 'turn/end')) c.blocks = null;
+      else if (c.blocks) { setWidth(c.width); for (const e of added) c.blocks.push(...c.render(e)); }
+      c.sum = null;
+    }
+    if (!c.sum || c.sum.mtime !== s.mtime || c.sum.logComplete !== result.complete) {
+      c.sum = summarize({ ...s, logComplete: result.complete, readError: result.error }, c.events);
+    } else c.sum.state = sessionState(c.sum.openTurns, c.sum.lastEnd, s.mtime);
     return c.sum;
   }
 
@@ -442,7 +471,20 @@ function tui() {
 
   function refresh() {
     const list = listSessions().slice(0, MAX_SESSIONS);
-    sessions = list.map(load).filter(s => s && s.state !== 'empty');
+    const keep = new Set(list.map(s => s.file));
+    for (const file of cache.keys()) if (!keep.has(file)) cache.delete(file);
+    const keepIds = new Set(list.map(s => s.id));
+    for (const id of prevState.keys()) if (!keepIds.has(id)) prevState.delete(id);
+    sessions = list.map(s => {
+      const summary = load(s);
+      let retained = [...cache.values()].reduce((n, c) => n + c.retainedBytes, 0);
+      for (const [file, entry] of cache) {
+        if (retained <= CACHE_BYTES) break;
+        if (file === s.file || entry.sum?.id === selId) continue;
+        retained -= entry.retainedBytes; cache.delete(file);
+      }
+      return summary;
+    }).filter(s => s && s.state !== 'empty');
     for (const s of sessions) {
       const before = prevState.get(s.id);
       if (['active', 'quiet'].includes(before) && !['active', 'quiet', 'empty'].includes(s.state)) {
@@ -514,6 +556,7 @@ function tui() {
   function detailRows(w, h) {
     const s = sessions.find(x => x.id === selId);
     if (!s) return Array.from({ length: h }, () => ' '.repeat(w));
+    if (!cache.has(s.file)) load(s);
     const c = cache.get(s.file);
     const { lines, keys } = linesFor(c, w - 3);
     shown = { lines, keys, h, c };
@@ -542,10 +585,12 @@ function tui() {
     const split = cols >= 110;
     const bodyH = rowsN - 2;
     const running = sessions.filter(s => s.state === 'active').length;
-    const title = ` ${bold('DeepSeek 会话')}  ${running ? yellow(`${SPIN[frame % SPIN.length]} ${running} 个最近有更新`) : gray('无近期更新')}  ${gray(`· ${sessions.length} 个`)}`;
+    const title = ` ${bold('dpsk-bridge')} ${gray(PACKAGE.version)}  ${running ? yellow(`${SPIN[frame % SPIN.length]} ${running} 个最近有更新`) : gray(`· ${sessions.length} 个会话`)}`;
     let status = '';
     if (!follow && inDetail()) status = yellow('⏸ 暂停跟随 · G 回到底部') + '   ';
     if (flash && Date.now() < flash.until) status = bold(flash.text) + '   ';
+    if (updateMessage) status = yellow(cut(updateMessage, Math.max(20, cols - width(title) - 14))) + ' ';
+    else if (updateInfo?.available) status = yellow(`新版本 ${updateInfo.latest} · u 更新`) + ' ';
     const clockStr = status + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ' ';
     const top = fit(title + ' '.repeat(Math.max(1, cols - width(title) - width(clockStr))) + clockStr, cols, BAR_BG);
 
@@ -584,6 +629,7 @@ function tui() {
       x += w + 1;
     };
     for (const t of TOGGLES) button(t.key, `${t.get() ? '●' : '○'} ${t.label}`, t.get() ? ON_BG : OFF_BG, t.run);
+    if (cols >= 110) button('u', updateTask ? '更新中' : '更新', OFF_BG, () => { void installUpdate(draw); });
     const hint = gray(inDetail() ? '↑↓ 移动 · Enter/点击 展开 · Esc 返回' : '↑↓ 选择 · Enter 进入');
     const quitW = width(' q  退出 ');
     const gap = cols - (x - 1) - width(hint) - quitW - 2;
@@ -633,6 +679,7 @@ function tui() {
 
   function onKey(k) {
     if (k === 'q' || k === '\x03') return quit();
+    if (k === 'u') { void installUpdate(draw); return; }
     const t = TOGGLES.find(t => k === t.key || k === t.alt);
     if (t) t.run();
     else if (k === '\t') { focus = focus === 'list' ? 'detail' : 'list'; view = view === 'list' ? 'detail' : 'list'; }
@@ -698,6 +745,7 @@ function tui() {
 
   let timers = [];
   function quit() {
+    if (updateTask) { flash = { until: Date.now() + 5000, text: yellow('正在完成更新，请稍候') }; draw(); return; }
     timers.forEach(clearInterval);
     out.write(`${ESC}?1006l${ESC}?1000l${ESC}?25h${ESC}0m${ESC}?1049l`);
     try { inp.setRawMode(false); } catch {}
@@ -711,11 +759,28 @@ function tui() {
   out.on('resize', () => { out.write(`${ESC}2J`); invalidate(); draw(); });
   refresh(); draw();
   timers = [setInterval(() => { refresh(); draw(); }, 1000), setInterval(draw, 200)];
+  void refreshUpdate(draw);
+  timers.push(setInterval(() => { void refreshUpdate(draw); }, 60 * 60 * 1000));
 }
 
-const [cmd, a1] = args;
-if ((!cmd || cmd === 'tui') && process.stdout.isTTY && process.stdin.isTTY) tui();
+const [cmd, a1] = flags.has('--help') ? ['help'] : args;
+if (flags.has('--version')) console.log(PACKAGE.version);
+else if (cmd === 'update') {
+  try {
+    if (flags.has('--recover')) console.log(JSON.stringify(await recoverUpdate({ confirmedStopped: flags.has('--confirmed-stopped') })));
+    else if (flags.has('--auto')) {
+      const value = argv[argv.indexOf('--auto') + 1];
+      if (!['on', 'off'].includes(value)) throw new Error('用法：dsv update --auto on|off');
+      console.log(JSON.stringify(setAutoUpdate(value === 'on')));
+    } else {
+      const info = await checkForUpdate({ force: true });
+      if (flags.has('--check') || !info.available) { console.log(JSON.stringify(info)); if (info.error) process.exitCode = 1; }
+      else console.log(JSON.stringify(await applyUpdate(info, { onProgress: message => console.error(message) })));
+    }
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
+}
+else if ((!cmd || cmd === 'tui') && process.stdout.isTTY && process.stdin.isTTY) tui();
 else if (!cmd || cmd === 'ls' || /^\d+$/.test(cmd)) ls(Number(/^\d+$/.test(cmd) ? cmd : a1) || 15);
 else if (cmd === 'show' || cmd === 's') show(a1);
 else if (cmd === 'watch' || cmd === 'w') watch(a1);
-else console.log(`用法:\n  dsv [N]              最近 N 个会话\n  dsv show [ID|latest] 查看会话过程\n  dsv watch [ID]       实时跟踪\n选项: --full  --no-reasoning  --all`);
+else console.log(`用法:\n  dsv [N]              最近 N 个会话\n  dsv show [ID|latest] 查看会话过程\n  dsv watch [ID]       实时跟踪\n  dsv update          检查并安装正式更新\n  dsv update --check  仅检查更新\n  dsv update --auto on|off  开关自动更新（默认关）\n  dsv update --recover --confirmed-stopped  确认旧进程退出后恢复更新预约\n选项: --full  --no-reasoning  --all  --no-update-check  --version`);

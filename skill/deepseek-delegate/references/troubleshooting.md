@@ -4,7 +4,10 @@
 
 | 现象 | 处理 |
 |---|---|
-| `sandbox escalation ... requires approval, but no approval channel is available` | headless 无法交互审批。由主代理在已有授权内处理受阻步骤，或报告需要的权限；不要自动关闭沙箱。 |
+| 任务等待问题或权限回复 | 读取 `dsb status <ID>` 的 `pendingRequests` 和 `dsb events <ID>`，用 `dsb answer` 回复。只批准已有用户授权覆盖的操作，不能自行决定时向用户澄清；不要关闭沙箱来绕过审批。 |
+| `send` / `answer` 已返回 `queued`，执行没有变化 | 入队不是送达。保存返回的输入 ID，翻页查找对应 `input_delivered` / `input_rejected`，必要时核对请求是否已取消。追加消息进入下一轮，不打断当前 step。 |
+| 作业停在 `queued` | 检查并发上限、同工作区范围冲突和同名 `--resource` 的占用。默认并发为 8，可通过 `DPSK_CONCURRENCY` 或 `--max-concurrent 1..256` 调整；不能为插队而虚报只读或缩小写入范围。取消和超时包含排队时间。 |
+| Node.js、dsh 或作业版本不受支持 | 更新到 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.2 和当前桥。只支持新版 SDK、v4 会话和当前作业格式；不要与旧版启动器混跑。 |
 | `detected dubious ownership` | 确认是本次授权项目后，在该条 Git 命令使用 `git -c safe.directory='<项目路径>' ...`，不改全局信任配置。 |
 | `cannot modify ...: file has not been read` | 覆盖已有文件前先读取，核对是否有其他进程改动。 |
 | `ReplaceFileW EIO (Win32 1175)` / 文件占用相关 IO error | 先检查文件当前内容和占用情况。确认是暂时性失败后重试受影响步骤，验收实际写入结果，不盲目重跑整个任务。 |
@@ -14,11 +17,13 @@
 
 ## 确认是否结束
 
-先查 `dsb status <ID>` 和宿主任务记录：Claude Code 查看后台任务，Codex 查看对应命令会话及退出码。宿主工具返回 `session_id` 只表示命令仍在运行，不能当作任务完成。`dsv` 的“有更新/无更新”只描述日志：五分钟无新日志可能只是长命令在运行，不能用它判定进程是否结束。
+先查 `dsb status <ID>` 和宿主的进程会话及退出码；Claude Code 的后台任务和 Codex 的命令会话只是示例。宿主工具返回进程句柄只表示命令仍在运行，不能当作任务完成。保留句柄并使用短而有界的等待，期间处理请求和更新。`dsv` 的“有更新/无更新”只描述日志：五分钟无新日志可能只是长命令在运行或正在等回复，不能用它判定进程是否结束。
 
-`dsb cancel <ID>` 返回的是取消请求已排队。等作业进入 `cancelled` 后才重派。`cleanup_failed` 表示进程树清理未确认成功，`unknown` 表示启动器意外结束且缺少退出记录；两者都保留锁。检查作业记录中的进程和部分成果，确认原任务及相关子进程停止后，才用 `dsb unlock <ID> --confirmed-stopped` 清理本作业的锁，再创建新任务。不要删除别人的锁或仅按超时猜测进程已经退出。
+`dsb cancel <ID>` 返回的是取消请求已排队。等作业进入 `cancelled` 后才重派。`cleanup_failed` 表示进程树清理未确认成功，`unknown` 表示启动器意外结束且缺少退出记录；两者都保留调度预约。检查作业记录中的进程和部分成果，确认原任务及相关子进程停止后，才用 `dsb unlock <ID> --confirmed-stopped` 清理本作业的预约，再创建新任务。不要删除别人的预约或仅按超时猜测进程已经退出。
 
-任务仍在运行时先检查当前进度。headless 没有交互式追问或原地追加任务接口；`dsb retry` 也是携带原始要求与修复反馈的新会话。
+任务仍在运行时先检查当前进度。用 `dsb send <ID> --message-file <UTF-8 文件>` 追加上下文，用 `dsb answer <ID> --request <请求 ID> --answer <JSON 文件>` 回复问题。普通答案为 `{"answers":[{"id":"问题 ID","selected":[],"custom":"回复"}]}`，每个原始问题 ID 回复一次；审批答案为 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。主代理只能转发已经取得的授权，无法判断时向用户澄清。作业结束后不能再发送消息；`dsb retry` 携带原始要求与修复反馈创建新会话。
+
+事件读取从 `dsb events <ID> --after 0 --limit 20` 开始，保存返回的字节 `cursor`；`more` 为真时继续读取。默认每页 20、上限 200；不要用事件条数推算游标。收到 `input_rejected` 后根据具体原因修正，不把入队回执当作执行成功。
 
 ## 从部分成果续做
 
@@ -33,23 +38,14 @@
 
 外部应用操作超时且结果不明确时，先只读查询其当前状态，再决定是否重试。无法确认执行结果时报告不确定性，不通过重复操作猜测成功与否。
 
-## 没有 dsb 时直接调用
+## dsb 不在 PATH 中
 
-先确认是否只是 PATH 尚未更新；两个宿主都可以用 `node "<仓库>/bin/dsb.mjs" ...`。确实无法使用启动器时，按实际 shell 选择直接调用方式，仍由宿主保留并管理进程。分别记录宿主会话 ID、报告、错误日志和实际退出码。
+先确认是否只是 PATH 尚未更新；任意宿主都可以用 `node "<dpsk-bridge 仓库>/bin/dsb.mjs" ...` 调用同一桥。确认依赖已安装，并使用当前版本的 `run` / `send` / `answer` / `events`；不能控制进程生命周期时先恢复宿主的执行能力，不以丢弃句柄或无限等待替代。
 
-Git Bash 示例（需要可用的 `timeout` 命令）：
+## 查看器与更新
 
-```bash
-cd "<项目目录>" && timeout 2700 dsh --profile headless "$(cat "$TEMP/brief-xxx.md")" > "$TEMP/dsh-xxx.out" 2> "$TEMP/dsh-xxx.err"
-```
+`dsv` 读取 v4 明文或 zstd 会话日志；找不到会话时核对 `DSH_HOME` 和 `DSH_SESSIONS_ROOT`。并发运行时用作业记录中的会话 ID 对应查看，不将其他会话的 `latest` 当作本次报告。残缺尾部可能只是仍在写入；查看器显示完整前缀，不能据此判定作业结束。
 
-PowerShell 没有对应的 GNU `timeout`；只有宿主执行工具能提供足够的超时及终止控制时才直接调用：
+`dsv update --check` 立即检查 GitHub Releases，TUI 发布结果缓存 6 小时；`dsv update` 或 TUI 中按 `u` 安装正式更新。`dsv update --auto on|off` 控制自动更新，默认关闭。更新会等桥作业完成后独占执行，排队最多等待 60 秒，繁忙时稍后重试；TUI 在更新期间暂缓退出。有本地改动或分叉时不自动覆盖，先保存改动并由宿主检查差异。网络或发布检查失败不表示没有新版本，不要清理工作区来强行更新。
 
-```powershell
-$dshBrief = Get-Content -LiteralPath '<brief 文件>' -Raw -Encoding UTF8
-Set-Location -LiteralPath '<项目目录>'
-& dsh --profile headless $dshBrief 1> '<报告文件>' 2> '<错误日志>'
-exit $LASTEXITCODE
-```
-
-按任务调整超时，必要时加 `--patch`。直接调用没有桥接锁、作业记录和自动关联用量，主代理自行协调范围并确认终止。不能控制生命周期时先恢复 `dsb`，不要以丢弃进程句柄或无限等待替代。不要将其他会话的 `latest` 结果当作本次任务报告。
+更新完成后重新打开 `dsv`，并在宿主刷新已安装的 skills，避免继续使用旧指令。自动技能同步脚本当前要求 Windows，其他平台手动复制 `skill/` 内容到宿主技能目录。

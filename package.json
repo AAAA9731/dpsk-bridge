@@ -1,12 +1,12 @@
 {
-  "name": "claude-deepseek-bridge",
-  "version": "0.3.0",
-  "description": "Let Claude Code and Codex delegate bounded tasks to local DeepSeek Harness: shared skills, a supervised launcher (dsb), and a session viewer (dsv).",
+  "name": "dpsk-bridge",
+  "version": "0.4.0",
+  "description": "A host-neutral DeepSeek Harness bridge with bidirectional sessions, concurrent task supervision, and a session viewer.",
   "private": true,
   "license": "LGPL-2.1-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AAAA9731/claude-deepseek-bridge.git"
+    "url": "git+https://github.com/AAAA9731/dpsk-bridge.git"
   },
   "type": "module",
   "bin": {
@@ -20,9 +20,14 @@
     "scripts"
   ],
   "engines": {
-    "node": ">=23.8"
+    "node": ">=24.9"
   },
   "scripts": {
-    "check": "node --check bin/dsv.mjs && node --check bin/dsb.mjs && node --check lib/bridge.mjs && node --check lib/sessions.mjs"
+    "check": "node --check bin/dsv.mjs && node --check bin/dsb.mjs && node --check lib/bridge.mjs && node --check lib/sessions.mjs && node --check lib/live.mjs && node --check lib/sdk.mjs && node --check lib/scheduler.mjs && node --check lib/host-plugin.mjs && node --check lib/updater.mjs && node --check scripts/sync-skills.mjs",
+    "test": "node --test",
+    "sync-skills": "node scripts/sync-skills.mjs"
+  },
+  "dependencies": {
+    "semver": "7.8.5"
   }
 }
