@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readEvents, createEventReader, listSessionFiles, sessionState, collectUsage } from '../lib/sessions.mjs';
 import { checkForUpdate, applyUpdate, readUpdateSettings, setAutoUpdate, recoverUpdate } from '../lib/updater.mjs';
-import { projectTranscript, groupSessionsByTime } from '../lib/viewer-model.mjs';
+import { projectTranscript, groupSessionsByTime, relativePath } from '../lib/viewer-model.mjs';
 
 const ROOT = process.env.DSH_SESSIONS_ROOT || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'sessions');
 const argv = process.argv.slice(2);
@@ -44,7 +44,7 @@ let W = Math.max(60, Math.min(process.stdout.columns || 100, 140));
 // ── styling ────────────────────────────────────────────────────────────────
 let TTY = process.stdout.isTTY;
 const sgr = code => s => (TTY ? `\x1b[${code}m${s}\x1b[0m` : String(s));
-const dim = sgr('2'), bold = sgr('1'), ital = sgr('2;3'), red = sgr('91'), green = sgr('92'),
+const bold = sgr('1'), ital = sgr('2;3'), red = sgr('91'), green = sgr('92'),
   yellow = sgr('93'), blue = sgr('94'), magenta = sgr('95'), cyan = sgr('96'), gray = sgr('90');
 
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
@@ -83,8 +83,6 @@ function wrap(text, w) {
   return out;
 }
 const squeeze = lines => lines.filter((l, i) => l.trim() || (i > 0 && lines[i - 1].trim() && i < lines.length - 1));
-const limit = (lines, max) => (FULL || lines.length <= max) ? lines
-  : [...lines.slice(0, max), gray(`… 还有 ${lines.length - max} 行（--full 查看全部）`)];
 
 const clock = t => new Date(t).toLocaleTimeString('zh-CN', { hour12: false });
 const when = t => new Date(t).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -122,7 +120,7 @@ function summarize(s, events = readEvents(s.file).events) {
     else if (e.type === 'turn/start') open++;
     else if (e.type === 'turn/end') { open = Math.max(0, open - 1); lastEnd = e.data.reason?.kind; }
     else if (e.type === 'tool/call') tools++;
-    else if (e.type === 'tool/result' && toolResult(e.data?.message)?.isError) errors++;
+    else if (e.type === 'tool/result' && (toolResult(e.data?.message)?.isError || e.data?.error)) errors++;
   }
   const state = sessionState(open, lastEnd, s.mtime);
   return { ...s, cwd, title: title || prompt, prompt, created, last, state, openTurns: open, lastEnd, tools, errors, usage: collectUsage(events) };
@@ -145,16 +143,16 @@ const setWidth = w => { W = w; body = W - G - 4; };
 
 function shortPath(p, cwd) {
   if (!p) return '';
-  const norm = s => s.replace(/\//g, '\\').toLowerCase();
-  if (cwd && norm(p).startsWith(norm(cwd) + '\\')) return p.slice(cwd.length + 1).replace(/\\/g, '/');
-  return p;
+  p = String(p);
+  const rel = relativePath(p, cwd);
+  return rel === p.replace(/\\/g, '/') ? p : rel;
 }
 
 function argSummary(name, raw, cwd) {
   let a; try { a = safeLog(JSON.parse(raw)); } catch { return safeText(raw); }
   if (!a || typeof a !== 'object') return String(raw);
   if (a.command) return String(a.command).split('\n')[0];
-  const p = a.file_path || a.path || a.filePath;
+  const p = a.file_path || a.path || a.filePath || a.target_file || a.targetPath;
   if (a.pattern) return `${cyan(`"${a.pattern}"`)}${p ? gray(' in ') + shortPath(p, cwd) : ''}${a.glob ? gray(' ' + a.glob) : ''}`;
   if (p) {
     let s = shortPath(p, cwd);
@@ -268,7 +266,7 @@ function makeRenderer(finals = new Set()) {
       case 'tool/result': {
         const r = toolResult(d.message);
         const id = r?.toolCallId;
-        const err = r?.isError;
+        const err = r?.isError || d.error;
         if (err) errors++;
         const who = id && id !== lastCall && names.get(id) ? gray(stripAnsi(toolLabel(names.get(id))) + ' ') : '';
         const text = textOf(r?.content);
@@ -374,7 +372,7 @@ function readingBlocks(events, columns, showProcess = DETAILS) {
   if (!showProcess) {
     const tools = nodes.filter(n => ['tool', 'error', 'question'].includes(n.kind)).length;
     const hidden = nodes.filter(n => !visible.includes(n));
-    if (hidden.length) blocks.push({ key: 'process-overview', lines: ['', gray(`过程  ${tools} 次工具操作 · d 查看`)],
+    if (hidden.length) blocks.push({ key: 'process-overview', lines: ['', gray(`过程  ${tools} 次工具操作 · ${INTERACTIVE ? 'd' : '--details'} 查看`)],
       full: ['', bold('过程摘要'), ...hidden.map(n => '  ' + cut(safeText(n.summary || n.title || n.text), max)), gray('d 打开完整过程，Enter 收起')] });
   }
   return blocks;
@@ -474,7 +472,7 @@ function watch(sel) {
     if (!started) { started = true; begin(); return; }
     let result; try { result = reader.read(); } catch (error) { console.error(red(error.message)); return; }
     if (result.reset) { printed.clear(); render = makeRenderer(finalSeqs(result.events)); console.log(yellow('日志已替换或截短，重新显示。')); }
-    if (!FULL && !ALL) printProjected(result.events);
+    if (!FULL && !ALL) { if (result.reset || result.added.length) printProjected(result.events); }
     else for (const e of result.added) { const r = blocksToText(render(e)); if (r) console.log(r); }
   };
   console.log(gray(`  实时跟踪中 · Ctrl+C 退出${pinned ? '' : ' · 有新会话会自动切换'}\n`));

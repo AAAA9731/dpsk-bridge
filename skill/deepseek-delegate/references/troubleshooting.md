@@ -5,12 +5,12 @@
 | 现象 | 处理 |
 |---|---|
 | 任务等待问题或权限回复 | 读取 `dsb status <ID>` 的 `pendingRequests` 和 `dsb events <ID>`，用 `dsb answer` 回复。只批准已有用户授权覆盖的操作，不能自行决定时向用户澄清；不要关闭沙箱来绕过审批。 |
-| `send` / `answer` 已返回 `queued`，执行没有变化 | 入队不是送达。保存返回的输入 ID，翻页查找对应 `input_delivered` / `input_rejected`，必要时核对请求是否已取消。追加消息进入下一轮，不打断当前 step。 |
+| `send` / `answer` 已返回 `queued`，执行没有变化 | 入队不是送达。保存返回的输入 ID，翻页查找对应 `input_delivered` / `input_rejected`，必要时核对请求是否已取消。通过文件通道转交给宿主插件的回答会先出现 `input_forwarded`（已转交、等待消费），它不等于已送达，仍要继续等 `input_delivered` 或 `input_rejected`。追加消息进入下一轮，不打断当前 step。 |
 | 作业停在 `queued` | 检查并发上限、同工作区范围冲突和同名 `--resource` 的占用。默认并发为 8，可通过 `DPSK_CONCURRENCY` 或 `--max-concurrent 1..256` 调整；不能为插队而虚报只读或缩小写入范围。取消和超时包含排队时间。 |
-| Node.js、dsh 或作业版本不受支持 | 更新到 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.2 和当前桥。只支持新版 SDK、v4 会话和当前作业格式；不要与旧版启动器混跑。 |
+| Node.js、dsh 或作业版本不受支持 | 更新到 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.3 和当前桥。只支持新版 SDK、v4 会话和当前作业格式；不要与旧版启动器混跑。 |
 | `detected dubious ownership` | 确认是本次授权项目后，在该条 Git 命令使用 `git -c safe.directory='<项目路径>' ...`，不改全局信任配置。 |
 | `cannot modify ...: file has not been read` | 覆盖已有文件前先读取，核对是否有其他进程改动。 |
-| `ReplaceFileW EIO (Win32 1175)` / 文件占用相关 IO error | 先检查文件当前内容和占用情况。确认是暂时性失败后重试受影响步骤，验收实际写入结果，不盲目重跑整个任务。 |
+| Windows: `ReplaceFileW EIO (Win32 1175)` / 文件占用相关 IO error | 先检查文件当前内容和占用情况。确认是暂时性失败后重试受影响步骤，验收实际写入结果，不盲目重跑整个任务。 |
 | `cannot read ...: not found` | 核对路径与工作目录。可在授权范围内定位已移动的文件；无法确认正确目标时报告阻塞。 |
 | exit 126 `path longer than allowed` | 检查工作目录长度。使用同一授权项目已有的短路径入口，或由主代理处理；不要自行复制、移动仓库或改到其他项目执行。 |
 | `invalid config` / MCP 启动失败 | 使用 `dsh-mcp` skill 检查所加载的 patch、依赖和必需环境变量；不要在诊断输出中打印凭据。 |

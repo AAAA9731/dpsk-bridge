@@ -5,7 +5,7 @@ description: Install, import, inspect, update, or remove MCP server patches for 
 
 # 管理 dsh 的 MCP
 
-供具备本地命令执行能力的任意宿主代理使用，Claude Code 和 Codex 是示例。要求 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.2 和当前 dpsk-bridge。一个 MCP server 对应 `~/.dsh/patches/<name>-mcp.yml`，通过 SDK 双向会话的 `dsb run --patch <文件>` 按需加载，可重复此参数。宿主可用的 MCP 不会自动出现在 dsh 中；只加载本任务需要的 server，避免额外工具定义和启动开销。
+供具备本地命令执行能力的任意宿主代理使用，Claude Code 和 Codex 是示例。要求 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.3 和当前 dpsk-bridge。一个 MCP server 对应 `~/.dsh/patches/<name>-mcp.yml`，通过 SDK 双向会话的 `dsb run --patch <文件>` 按需加载，可重复此参数。宿主可用的 MCP 不会自动出现在 dsh 中；只加载本任务需要的 server，避免额外工具定义和启动开销。
 
 ## 列出与复用
 
@@ -28,9 +28,9 @@ description: Install, import, inspect, update, or remove MCP server patches for 
 
 先用 `dsh --profile sdk --patch <文件> --dump-config` 在本地验证配置可以组合，只报告是否成功和相关的脱敏错误，不将整份配置输出到对话。
 
-再验证连接与工具注册。如果已有无需模型调用的 MCP 客户端或探测工具，优先复用它。否则通过一次有超时上限的 `dsb run --patch <文件>`，让 dsh 确认指定前缀工具存在，并调用一个与目标匹配、无需额外外部动作的只读工具；返回工具名和简短结果证据。默认路由为 `deepseek-official` / `deepseek-v4-flash`，可用 `--provider` / `--model` 或 `DPSK_PROVIDER` / `DPSK_MODEL` 覆盖。前提未满足时不调用，不能拿模型列出的名称代替真实调用结果。
+再验证连接与工具注册。如果已有无需模型调用的 MCP 客户端或探测工具，优先复用它。否则通过一次有超时上限的 `dsb run --patch <文件>`，让 dsh 确认指定前缀工具存在，并调用一个与目标匹配、无需额外外部动作的只读工具；返回工具名和简短结果证据。默认路由为 `deepseek-official` / `deepseek-flash`，可用 `--provider` / `--model` 或 `DPSK_PROVIDER` / `DPSK_MODEL` 覆盖。前提未满足时不调用，不能拿模型列出的名称代替真实调用结果。
 
-验证中保留宿主进程会话，用短而有界的等待读取 `dsb events <ID>` 和 `dsb status <ID>` 的 `pendingRequests`。使用 `dsb answer` 回复问题或权限请求，只有现有用户授权覆盖操作时才能批准；不能自行决定时向用户澄清。入队不等于送达，核对后续 `input_delivered` / `input_rejected`。共享同一应用或 MCP 实例的并发作业应使用相同 `--resource <名称>`；只读声明和资源预约不能替代应用权限或沙箱。
+验证中保留宿主进程会话，用短而有界的等待读取 `dsb events <ID>` 和 `dsb status <ID>` 的 `pendingRequests`。使用 `dsb answer` 回复问题或权限请求，只有现有用户授权覆盖操作时才能批准；不能自行决定时向用户澄清。入队不等于送达，核对后续 `input_delivered` / `input_rejected`；通过文件通道转交给宿主插件的回答会先出现 `input_forwarded`（已转交、等待消费），它不等于已送达，仍要继续等 `input_delivered` 或 `input_rejected`。共享同一应用或 MCP 实例的并发作业应使用相同 `--resource <名称>`；只读声明和资源预约不能替代应用权限或沙箱。
 
 一次验证同时覆盖发现与只读调用，不分成两次付费模型调用。工具错误、无工具、权限不足分别报告；未经实际调用验证时明确说明，不能标记为已验证。将验证时间、server/patch 版本及简短结果记在 patch 的额外注释中（不改变前四行）；后续配置或依赖发生变化时再验证。
 
@@ -38,7 +38,7 @@ description: Install, import, inspect, update, or remove MCP server patches for 
 
 更新前检查现有 patch；只改所需字段，保留用户设置。尽量保持 `serverName`，它决定工具名称前缀。更新后重新验证。
 
-用户明确要求卸载指定 MCP 时，检查该 patch、备份后删除，并用 `rg` 检查当前相关项目的引用，提醒需要调整的 brief。对象不明确时再询问，不重复请求已经给出的卸载授权。不顺带卸载 npm/uv 包、删除凭据或终止共享服务。
+用户明确要求卸载指定 MCP 时，检查该 patch、备份后删除，并用宿主可用的搜索方式（如 `rg`、`grep` 或宿主自带的代码搜索）检查当前相关项目的引用，提醒需要调整的 brief。对象不明确时再询问，不重复请求已经给出的卸载授权。不顺带卸载 npm/uv 包、删除凭据或终止共享服务。
 
 ## 常见问题
 

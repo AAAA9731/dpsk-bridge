@@ -36,13 +36,15 @@
 
 ## 配置来源
 
+下表是常见客户端示例，不是完整清单；其他客户端按其官方 MCP 文档找到 server 定义即可，语义相同：启动命令用 command/args/cwd，环境变量用 env，远程服务用 url 和请求头（传输类型按下文映射）。
+
 | 来源 | 位置 |
 |---|---|
 | Claude Code | `claude mcp get <name>`；`~/.claude.json` 中全局及项目的 `mcpServers`；项目 `.mcp.json` |
 | Codex | 当前生效配置的 `[mcp_servers.<name>]`；默认用户配置 `~/.codex/config.toml`，自定义 `CODEX_HOME` 时位于该目录；同时检查已信任项目从根目录到当前目录适用的 `.codex/config.toml`，以及已启用 profile 的覆盖 |
-| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` 的 `mcpServers` |
+| Claude Desktop | Windows 用 `%APPDATA%\Claude\claude_desktop_config.json`，macOS 用 `~/Library/Application Support/Claude/claude_desktop_config.json`，Linux 以其官方文档为准；仍是 `mcpServers` 字段 |
 
-字段映射：
+字段映射（下列字段名主要来自 Codex 配置，其他客户端按语义对应）：
 
 - `command` / `args` / `cwd`：保留已确认的启动语义，确认本机路径存在。
 - `env` / `headers`：保留变量名与认证方式，凭据改成上面的环境引用。

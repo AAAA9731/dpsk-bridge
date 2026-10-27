@@ -58,7 +58,8 @@ test('no releases, invalid tags, drafts, prereleases, and oversized responses ne
 });
 
 function git(root, args) {
-  const result = spawnSync('git', ['-c', `safe.directory=${root}`, '-c', 'user.name=Updater test', '-c', 'user.email=updater@example.invalid', ...args],
+  const result = spawnSync('git', ['-c', `safe.directory=${root}`, '-c', 'user.name=Updater test', '-c', 'user.email=updater@example.invalid',
+    '-c', 'commit.gpgSign=false', '-c', 'tag.gpgSign=false', ...args],
     { cwd: root, windowsHide: true, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
 }

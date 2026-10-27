@@ -182,21 +182,21 @@ try {
 if (Get-Command dsh -ErrorAction SilentlyContinue) {
     $dshVer = (& dsh --version).Trim()
     Ok "dsh $dshVer"
-    & node -e "const s=require(process.argv[1]); process.exit(s.valid(process.argv[2]) && s.gte(process.argv[2], '0.2.1-rc.2') ? 0 : 1)" (Join-Path $Repo 'node_modules/semver') $dshVer
+    & node -e "const s=require(process.argv[1]); process.exit(s.valid(process.argv[2]) && s.gte(process.argv[2], '0.2.1-rc.3') ? 0 : 1)" (Join-Path $Repo 'node_modules/semver') $dshVer
     if ($LASTEXITCODE -ne 0) {
-        & npm install -g '@deepseek-ai/dsh@latest' --no-fund --no-audit | Out-Host
+        & npm install -g '@deepseek-ai/dsh@0.2.1-rc.3' --no-fund --no-audit | Out-Host
         if ($LASTEXITCODE -ne 0) { throw 'Cannot update dsh to the required version.' }
         Did 'Updated dsh; existing configuration and credentials are preserved.'
     }
 }
 else {
-    & npm install -g '@deepseek-ai/dsh@latest' --no-fund --no-audit | Out-Host
+    & npm install -g '@deepseek-ai/dsh@0.2.1-rc.3' --no-fund --no-audit | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Cannot install dsh.' }
     Did 'Installed dsh. Configure authentication before delegating.'
 }
 $installedDsh = (& dsh --version).Trim()
-& node -e "const s=require(process.argv[1]); process.exit(s.valid(process.argv[2]) && s.gte(process.argv[2], '0.2.1-rc.2') ? 0 : 1)" (Join-Path $Repo 'node_modules/semver') $installedDsh
-if ($LASTEXITCODE -ne 0) { throw "Installed dsh does not satisfy >=0.2.1-rc.2: $installedDsh" }
+& node -e "const s=require(process.argv[1]); process.exit(s.valid(process.argv[2]) && s.gte(process.argv[2], '0.2.1-rc.3') ? 0 : 1)" (Join-Path $Repo 'node_modules/semver') $installedDsh
+if ($LASTEXITCODE -ne 0) { throw "Installed dsh does not satisfy >=0.2.1-rc.3: $installedDsh" }
 Push-Location $Repo
 try { & npm run check | Out-Host; if ($LASTEXITCODE -ne 0) { throw 'Bridge source checks failed.' } }
 finally { Pop-Location }

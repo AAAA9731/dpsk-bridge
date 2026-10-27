@@ -4,7 +4,7 @@
 
 ## 依赖与安装
 
-要求 Node.js >=24.9、Git、npm 和 `@deepseek-ai/dsh` >=0.2.1-rc.2。安装及技能同步脚本面向 Windows PowerShell；核心 CLI 有 Windows/Linux 测试。当前仅支持 SDK 协议、v4 日志和新版作业格式。
+要求 Node.js >=24.9、Git、npm 和 `@deepseek-ai/dsh` >=0.2.1-rc.3。安装及技能同步脚本面向 Windows PowerShell；核心 CLI 有 Windows/Linux 测试。当前仅支持 SDK 协议、v4 日志和新版作业格式。
 
 克隆到长期保留的目录，阅读脚本后选择一个宿主安装。需要多个宿主时分别执行：
 
@@ -18,6 +18,15 @@ cd dpsk-bridge
 
 脚本安装锁定依赖、安装或升级不满足要求的 dsh，同步所选宿主的 skills，通过 npm link 提供 dsb/dsv。安装目录之后不要移动；安装后重新打开宿主会话。它保留 dsh 鉴权与 `~/.dsh/patches/`，覆盖托管 skill 前备份到 `~/.dpsk-bridge/backups/`。
 
+没有 PowerShell，或宿主没有固定技能目录时，手动安装：
+
+```text
+npm ci --ignore-scripts
+npm link
+```
+
+然后把 `skill/` 下的两个目录复制到宿主加载技能的位置；`dsb`/`dsv` 即可使用。
+
 从旧项目名升级：先结束旧作业，将 origin 更新为上方地址，拉取代码并重新运行所选宿主安装命令。脚本迁移旧的 skill 归属清单和命令入口；不读取旧作业格式，历史日志不会删除。卸载所选宿主时加 `-Uninstall`；Generic 同时保留原 `-SkillsDir`。其他宿主仍在使用时保留共享命令。
 
 ## 双向任务
@@ -25,7 +34,7 @@ cd dpsk-bridge
 ```text
 dsb run --cwd "项目路径" --brief "brief.md" --timeout 2700
 dsb run --cwd "项目路径" --brief "brief.md" --patch "MCP配置.yml"
-dsb run --cwd "项目路径" --brief "brief.md" --provider deepseek-official --model deepseek-v4-flash
+dsb run --cwd "项目路径" --brief "brief.md" --provider deepseek-official --model deepseek-flash
 dsb status <作业ID>
 dsb events <作业ID> --after 0 --limit 20
 dsb send <作业ID> --message-file "追加要求.md"
@@ -34,7 +43,7 @@ dsb result <作业ID>
 dsb cancel <作业ID>
 ```
 
-run 保持连接；宿主保留执行句柄，在有界等待间读取问题和更新。events 返回完整事件与字节 cursor，将它传给下一次 --after；more 表示还有未读事件。status.pendingRequests 列出问题或审批。普通问题的回复文件按原问题 ID 一一填写：
+run 保持连接；宿主保留执行句柄，在有界等待间读取问题和更新。命令工具不能在运行期间返回输出时，把 --timeout 设为可接受上限，结束后用 dsb result 读取结果；这类宿主只适合派不需要中途决策的任务。events 返回完整事件与字节 cursor，将它传给下一次 --after；more 表示还有未读事件。status.pendingRequests 列出问题或审批。普通问题的回复文件按原问题 ID 一一填写：
 
 ```json
 {"answers":[{"id":"original-question-id","selected":[],"custom":"宿主补充的信息"}]}
@@ -42,9 +51,11 @@ run 保持连接；宿主保留执行句柄，在有界等待间读取问题和�
 
 审批使用 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。宿主依据实际授权决定，桥不会自动授予权限；需要用户决定时先澄清。随作业加载的 Harness 插件转发提问和审批，SDK 负责追加消息及实时日志，每项作业拥有独立 SDK 进程。
 
-send/answer 返回 queued 只表示进入邮箱，须在事件中确认 input_delivered 或 input_rejected。追加要求进入后续回合，不打断当前步骤。结束后不能原地追加，应新建任务或 retry。
+send/answer 返回 queued 只表示进入邮箱，须在事件中确认 input_delivered 或 input_rejected；通过文件通道转交给宿主插件的回答会先出现 input_forwarded（已转交、等待消费），它不等于已送达，仍要继续等 input_delivered 或 input_rejected。追加要求进入后续回合，不打断当前步骤。结束后不能原地追加，应新建任务或 retry。
 
-默认路由为 deepseek-official/deepseek-v4-flash，可用参数或 DPSK_PROVIDER/DPSK_MODEL 覆盖。模型路由在每次 SDK 初始化时明确设置。--dsh-entry 可以指定本机 dsh 的 lib/bin.js。
+默认路由为 deepseek-official/deepseek-flash，可用参数或 DPSK_PROVIDER/DPSK_MODEL 覆盖。模型路由在每次 SDK 初始化时明确设置。--dsh-entry 可以指定本机 dsh 的 lib/bin.js。
+
+需要让 dsh 看图时重复传 --image <文件>：仅支持 JPEG、PNG、GIF、WebP（按文件内容判断，不看扩展名），最多 20 张，首次消息连同文字按 base64 编码后不得超过 8 MiB（8388608 字节）。图片只在首次发送时附带，dsb send 的追加消息不能带图片；dsb retry 沿用原作业的图片，图片在派单后被改动或删除会拒绝。识图需使用支持图片输入的模型（默认的 deepseek-flash 支持）；若用 --model 换成不支持图片的模型，dsh 会静默把图片换成文字占位符，验收时要确认报告确实描述了图片内容，不能只看 RESULT: OK。
 
 作业、完整报告、前后 Git 状态、交互事件和用量保存在 `$DSH_HOME/bridge/jobs/<ID>/`，默认 `~/.dsh/bridge/jobs/<ID>/`。Git 状态清单不是备份。processState、模型的 reportedResult 和宿主验收相互独立。
 
@@ -58,7 +69,7 @@ dsb stats
 
 ## 高并发
 
-默认最多 8 项任务；共享同一个 DSH_HOME 的新版启动器共同排队。DPSK_CONCURRENCY 或 --max-concurrent 可设置 1–256。参与请求取最小上限；统一提高并发时，应给全部启动器设置同一个环境变量。实际吞吐受服务配额、机器资源和范围冲突限制，256 不是实测吞吐保证。
+默认最多 8 项任务；共享同一个 DSH_HOME 的新版启动器共同排队。DPSK_CONCURRENCY 或 --max-concurrent 可设置 1–256。参与请求取最小上限；dsb retry 沿用原作业记录的最大并发数，不读取当前的 DPSK_CONCURRENCY。统一提高并发时，应给全部启动器设置同一个环境变量。实际吞吐受服务配额、机器资源和范围冲突限制，256 不是实测吞吐保证。
 
 ```text
 dsb run --cwd "项目" --brief "前端.md" --scope src/frontend --max-concurrent 32
@@ -100,7 +111,7 @@ dsv 读取当前 v4 明文/zstd 日志，增量处理残缺尾部、原生工具
 
 左侧按最后更新时间分成今天、昨天、近 7 天、更早，按本地日历日划分。今天和启动时当前会话所在组默认展开，其余历史组收起；分组只展示非空组并附任务数。点击组标题，或在列表中选中组后按 Enter/空格折叠展开，左右键收起/展开。折叠不切换正文，刷新期间保留折叠状态。
 
-Tab 在任务列表与正文间切换，方向键或 j/k 移动，Enter/空格展开，Esc 返回列表，PgUp/PgDn 翻页，g/G 到顶/底，e/E 全部展开/收起。r 显示思考，i 查看路径/ID/用量，? 查看帮助，q 退出。自动切换(a)和提示音(b)默认关闭，可按需开启。窄窗口直接显示正文。日志状态不证明进程存活或验收结果。缓存最多 60 个会话，单会话 16 MiB/3 万事件，总解码缓存 64 MiB，超过限制会提示。
+Tab 在任务列表与正文间切换，方向键或 j/k 移动，Enter/空格展开，Esc 返回列表，PgUp/PgDn 翻页，g/G 到顶/底，e/E 全部展开/收起。r 显示思考，i 查看路径/ID/用量，? 查看帮助，q 退出。自动切换(a)和提示音(b)默认关闭，可按需开启。窄窗口直接显示正文。日志状态不证明进程存活或验收结果。缓存最多 60 个会话，单会话 16 MiB/3 万事件，总解码缓存 64 MiB；单会话超过上限会显示读取失败，总缓存超过上限时静默淘汰最早加入缓存的会话，不提示。
 
 TUI 异步检查 GitHub 最新正式 Release，缓存 6 小时，常驻时每小时重新评估。发现更新后顶栏提示，按 u 安装。网络检查失败不影响查看；普通命令行查看不联网检查。设置 NO_UPDATE_NOTIFIER=1、CI 环境或 --no-update-check 可关闭 TUI 自动检查，显式 dsv update 仍可用。
 
