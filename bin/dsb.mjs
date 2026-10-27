@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { runJob, readJob, status, result, retryJob, reviewJob, cancelJob, unlockJob, stats, briefText, sendMessage, answerRequest, eventsPage } from '../lib/bridge.mjs';
 
 const usage = `dsb — dpsk-bridge: host-neutral, bidirectional DeepSeek delegation
-  dsb run --cwd <project> --brief <file> [--patch <file> ...] [--timeout <seconds>]
+  dsb run --cwd <project> --brief <file> [--patch <file> ...] [--image <file> ...] [--timeout <seconds>]
     [--provider <route>] [--model <name>]
     [--max-concurrent <1..256>] [--scope <path> ...] [--read-only] [--resource <name> ...]
   dsb status <id> | result <id> | cancel <id>
@@ -12,17 +12,18 @@ const usage = `dsb — dpsk-bridge: host-neutral, bidirectional DeepSeek delegat
   dsb events <id> [--after <byte-cursor>] [--limit <1..200>]
   dsb retry <id> --feedback <file>
   dsb review <id> --verdict accepted|rework|blocked --note <verification evidence> [--accounting <json>]
+    accounting JSON: {"currency":"CNY","source":"<source>","<host>Cost":<number>,"deepseekCost":<number>} (any key ending in Cost is recorded)
   dsb unlock <id> --confirmed-stopped
   dsb stats
-Run/retry stay attached; use the host's background task mechanism.
-SDK defaults: deepseek-official / deepseek-v4-flash (override with DPSK_PROVIDER/DPSK_MODEL).
+Run/retry stay attached until the job ends: keep the process/session handle your host provides and read events and requests with bounded waits (see the deepseek-delegate skill).
+SDK defaults: deepseek-official / deepseek-flash (override with DPSK_PROVIDER/DPSK_MODEL).
 Global concurrency defaults to 8 (DPSK_CONCURRENCY); scopes/resources are cooperative declarations.
 send/answer queue input; events confirms delivery. Followups enter the next turn.
 No model call is made by status/result/events/cancel/review/unlock/stats.
 --dsh-entry <path/to/dsh/lib/bin.js> overrides local CLI discovery for run.`;
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 function parse(args, allowed) {
-  const out = { patch: [], scope: [], resource: [] };
+  const out = { patch: [], scope: [], resource: [], image: [] };
   for (let i = 0; i < args.length; i++) {
     const key = args[i];
     if (!allowed.includes(key)) throw new Error(`Unknown option: ${key}`);
@@ -31,7 +32,7 @@ function parse(args, allowed) {
     const value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${key}`);
     const name = key.slice(2).replace(/-([a-z])/g, (_, ch) => ch.toUpperCase());
-    if (['patch', 'scope', 'resource'].includes(name)) out[name].push(value);
+    if (['patch', 'scope', 'resource', 'image'].includes(name)) out[name].push(value);
     else { if (name in out) throw new Error(`Duplicate option: ${key}`); out[name] = value; }
   }
   return out;
@@ -40,7 +41,7 @@ try {
   const [command, ...args] = process.argv.slice(2);
   if (!command || ['help', '--help', '-h'].includes(command)) console.log(usage);
   else if (command === 'run') {
-    const options = parse(args, ['--cwd', '--brief', '--patch', '--timeout', '--dsh-entry', '--provider', '--model', '--max-concurrent', '--scope', '--read-only', '--resource']);
+    const options = parse(args, ['--cwd', '--brief', '--patch', '--image', '--timeout', '--dsh-entry', '--provider', '--model', '--max-concurrent', '--scope', '--read-only', '--resource']);
     if (!options.brief) throw new Error('--brief is required');
     const job = await runJob(options, emit); emit({ event: 'finished', ...result(job) });
     process.exitCode = job.processState === 'completed' && job.reportedResult === 'OK' ? 0 : 1;
@@ -55,14 +56,14 @@ try {
     else if (command === 'result') emit(result(job));
     else if (command === 'cancel') emit(cancelJob(job));
     else if (command === 'unlock') emit(await unlockJob(job, options.confirmedStopped));
-    else if (command === 'send') { if (!options.messageFile) throw new Error('--message-file is required'); emit(sendMessage(job, briefText(options.messageFile))); }
-    else if (command === 'answer') { if (!options.answer) throw new Error('--answer is required'); emit(answerRequest(job, options.request, JSON.parse(briefText(options.answer)))); }
+    else if (command === 'send') { if (!options.messageFile) throw new Error('--message-file is required'); emit(sendMessage(job, briefText(options.messageFile, 'Message'))); }
+    else if (command === 'answer') { if (!options.answer) throw new Error('--answer is required'); emit(answerRequest(job, options.request, JSON.parse(briefText(options.answer, 'Answer')))); }
     else if (command === 'events') emit(eventsPage(job, options.after, options.limit));
     else if (command === 'review') emit(reviewJob(job, options.verdict, options.note, undefined,
       options.accounting ? JSON.parse(fs.readFileSync(options.accounting, 'utf8').replace(/^\uFEFF/, '')) : null));
     else {
       if (!options.feedback) throw new Error('--feedback is required');
-      const next = await retryJob(job, briefText(options.feedback), emit);
+      const next = await retryJob(job, briefText(options.feedback, 'Feedback'), emit);
       emit({ event: 'finished', ...result(next) });
       process.exitCode = next.processState === 'completed' && next.reportedResult === 'OK' ? 0 : 1;
     }

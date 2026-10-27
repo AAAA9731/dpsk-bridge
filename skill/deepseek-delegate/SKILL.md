@@ -5,7 +5,7 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 
 # DeepSeek 委派（dpsk-bridge）
 
-供具备本地命令执行能力的任意宿主代理使用，Claude Code 和 Codex 是示例。主代理负责理解用户目标、确定边界、回复执行中的问题并验收；dsh 自行调查、实现并验证。dpsk-bridge 使用 SDK 双向会话，按需加载 MCP。要求 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.2；先更新到要求版本，不使用旧启动方式或旧作业记录。
+供具备本地命令执行能力的任意宿主代理使用，Claude Code 和 Codex 是示例。主代理负责理解用户目标、确定边界、回复执行中的问题并验收；dsh 自行调查、实现并验证。dpsk-bridge 使用 SDK 双向会话，按需加载 MCP。要求 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.3；先更新到要求版本，不使用旧启动方式或旧作业记录。
 
 ## 何时委派
 
@@ -15,7 +15,7 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 |---|---|
 | 定位相关文件、梳理调用关系、批量扫描日志，返回带位置的结论 | 澄清需求、跨模块取舍，以及对调查结论作最终判断 |
 | 按目标和现有约定实现一个功能或修复，连同相关测试 | 需要持续讨论的设计、涉及关键安全或数据完整性的决定 |
-| 批量转换、机械修改、运行已知验证流程、范围明确的 MCP 操作 | 一两行即可完成的小改动，以及派单和验收成本更高的任务 |
+| 批量转换、机械修改、运行已知验证流程、范围明确的 MCP 操作 | 一两行即可完成的小改动，以及派单和验收成本更高的任务，已有界面代码的调整 |
 
 不要求已有计划、完整代码或额外插件。已有规格就引用；没有规格就给出可观察的完成条件。难题也可以先委派有边界的证据收集，再由主代理决定下一步。
 
@@ -43,15 +43,19 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 
 ## 调用与等待
 
-将 brief 以 UTF-8 写到项目内适合放任务材料的位置。使用本包的 `dsb` 启动器：它保存原始要求、Git 状态基线、报告和退出码，并协调并发。`run` / `retry` 持续运行直到作业结束，由宿主保留进程会话并服务双向请求：
+将 brief 以 UTF-8 写到项目内适合放任务材料的位置。使用本包的 `dsb` 启动器：它保存原始要求、Git 状态基线、报告和退出码，并协调并发。`run` / `retry` 持续运行直到作业结束，由宿主保留进程会话并服务双向请求。
+
+下表中的宿主名只是示例，不是额外要求；未列出的宿主按“任意宿主”一行处理，参数名以你实际拥有的工具为准，不要把某个宿主的参数传给另一个宿主。
 
 | 宿主 | 启动与等待 |
 |---|---|
 | 任意宿主 | 使用实际可用的后台命令或进程会话接口，保存句柄，用短而有界的等待读取更新，并检查问题和权限请求。 |
-| Claude Code | 使用 Bash 工具的 `run_in_background: true`，记录后台任务 ID；执行中读取桥接事件并回复请求，结束后读取结果。 |
-| Codex | 用当前可用的命令执行工具运行。若提供 `exec_command` / `write_stdin`，设置有界 `yield_time_ms`，保存返回的 `session_id`，再用 `write_stdin` 等待和读取后续结果；不要把 Claude 的后台参数传给 Codex。 |
+| Claude Code | 示例：若 Bash 工具支持 `run_in_background: true`，用它启动并记录后台任务 ID；没有该参数时按“任意宿主”一行处理。执行中读取桥接事件并回复请求，结束后读取结果。 |
+| Codex | 用当前可用的命令执行工具运行。若提供 `exec_command` / `write_stdin`，设置有界 `yield_time_ms`，保存返回的 `session_id`，再用 `write_stdin` 等待和读取后续结果；各宿主参数名不同，不要混用。 |
 
 同时记录 `dsb` 输出的完整作业 ID；它不同于宿主的会话 ID。以当前工具实际支持的接口为准，不能丢弃进程句柄、创建无人管理的进程或无限等待。执行需要的文件、网络或子进程权限通过宿主现有授权流程处理。
+
+如果你的命令工具不能在命令运行期间返回输出，就无法在作业进行中回复提问或审批。这时把 `--timeout` 设为可接受的上限，结束后用 `dsb result <ID>` 读取结果；这类宿主只适合派不需要中途决策的任务，遇到提问导致超时时，用 `dsb retry` 重新派单。
 
 示例（`2700` 秒为示例上限，按任务调整；需要 MCP 时重复添加 `--patch <文件>`）：
 
@@ -59,7 +63,9 @@ description: Delegate bounded coding, investigation, batch processing, or MCP ta
 dsb run --cwd "<项目目录>" --brief "<brief 文件>" --timeout 2700
 ```
 
-默认 provider/model 为 `deepseek-official` / `deepseek-v4-flash`；用 `--provider`、`--model` 或 `DPSK_PROVIDER`、`DPSK_MODEL` 覆盖，明确保留用户指定的路由。
+默认 provider/model 为 `deepseek-official` / `deepseek-flash`；用 `--provider`、`--model` 或 `DPSK_PROVIDER`、`DPSK_MODEL` 覆盖，明确保留用户指定的路由。
+
+需要让 dsh 看图时重复传 `--image <文件>`：仅支持 JPEG、PNG、GIF、WebP（按文件内容判断，不看扩展名），最多 20 张，首次消息连同文字按 base64 编码后不得超过 8 MiB（8388608 字节）。图片只在首次发送时附带，执行中 `dsb send` 的追加消息不能带图片；`retry` 沿用原作业的图片，图片被改动或删除会被拒绝。识图需使用支持图片输入的模型（默认的 `deepseek-flash` 支持）；若用 `--model` 换成不支持图片的模型，dsh 会静默把图片换成文字占位符，主代理必须核对报告确实描述了图片内容，不能只看 `RESULT: OK`。
 
 - 使用短而有界的会话等待，在等待间隙处理 `dsb events` 和 `status.pendingRequests`；不能只等最终完成通知，否则 dsh 的提问可能无人回复。无新内容时避免高频轮询。完整报告和错误日志留在返回的路径，按需读取相关片段。
 - `dsb status <ID>` 查询进程记录，`dsb result <ID>` 获取短报告。`completed` 仅表示进程退出码为 0；`reportedResult` 是模型自述，`acceptance` 才是主代理记录的验收结果。
@@ -82,7 +88,7 @@ dsb run --cwd "<项目目录>" --brief "<brief 文件>" --timeout 2700
 
 `id` 使用请求中的问题 ID；有选项时按请求填写 `selected`。权限回复为 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。桥只转发权限决定，不能扩大授权；宿主依据已经取得的用户授权回复，不能自行决定时向用户澄清并等待，不能自动批准。
 
-`send` / `answer` 返回 `queued` 只表示已入队，必须继续读取 `input_delivered` 或 `input_rejected` 事件确认处理结果。请求 ID 与作业 ID 不同；不要向已过期或其他作业的请求发送回复。主代理在保持进程会话受管理的同时处理这些事件，避免将等待回复误判为停滞。
+`send` / `answer` 返回 `queued` 只表示已入队，必须继续读取 `input_delivered` 或 `input_rejected` 事件确认处理结果；通过文件通道转交给宿主插件的回答会先出现 `input_forwarded`（已转交、等待消费），它不等于已送达，仍要继续等 `input_delivered` 或 `input_rejected`。请求 ID 与作业 ID 不同；不要向已过期或其他作业的请求发送回复。主代理在保持进程会话受管理的同时处理这些事件，避免将等待回复误判为停滞。
 
 ## 验收与返工
 
@@ -98,7 +104,9 @@ dsb run --cwd "<项目目录>" --brief "<brief 文件>" --timeout 2700
 
 小修正由主代理直接处理。返工有明确修复范围时，将具体失败证据写入文件，执行 `dsb retry <ID> --feedback <文件>` 并按同一宿主方式等待；启动器沿用原始目标、工作目录和 MCP 配置，生成关联的新会话。反馈只补充证据和待办；用户改变目标或 MCP 配置变化时，重新准备完整 brief 创建新任务，不通过返工偷偷改变原始范围。
 
-相同失败重试一次仍无新进展时停止重复派单，改由主代理诊断或处理阻塞；不要为了坚持委派而继续消耗。续做不会恢复旧会话的全部上下文，仍须指向现有成果和相关证据。
+dsh 的工作出现问题时，第一次可以让 dsh 回去继续修复（用 `dsb retry` 并附上具体失败证据）。如果修复回来问题仍然存在，或者更加恶化，就不要再派 dsh 继续修，改由主代理亲自接手修复；不要为了坚持委派而继续消耗。续做不会恢复旧会话的全部上下文，仍须指向现有成果和相关证据。
+
+UI 类任务（界面、样式、交互、终端界面等）分两种情况。从零实现时，先让 dsh 写初版，写完后由主代理亲自检查并微调，包括实际运行或渲染出来确认观感和交互，而不是只看代码。在已有代码上调整界面时，由主代理直接修改，不要再派 dsh。主代理自己做的微调和修改，在验收记录里单独说明，不算作 dsh 的产出。
 
 确认任务确实退出后才能重派。需要停止时用 `dsb cancel <ID>`，接受取消请求不等于已退出；`unknown` 或 `cleanup_failed` 时先处理遗留进程，不重派。dsv 的“无更新”不能证明中断。中断后的部分改动可能仍然有效，先核对现状再续做，详见 [故障与恢复](references/troubleshooting.md)。
 

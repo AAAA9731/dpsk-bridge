@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { runSdk, queueInput } from '../lib/live.mjs';
+import { runSdk, queueInput, eventsPage } from '../lib/live.mjs';
 import { apply } from '../lib/host-plugin.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -41,7 +41,7 @@ class FakeChild extends EventEmitter {
     this.send({ id: this.waiting, result: {} });
   }
 }
-function fixture(t, emit = () => {}) {
+function fixture(t, emit = () => {}, signal = null) {
   const root = fs.mkdtempSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'live-fixture-'));
   const home = path.join(root, 'home'), id = randomUUID(), dir = path.join(home, 'jobs', id), host = path.join(dir, 'host');
   for (const part of ['requests', 'responses', 'cancelled', 'receipts']) fs.mkdirSync(path.join(host, part), { recursive: true });
@@ -50,7 +50,7 @@ function fixture(t, emit = () => {}) {
     processState: 'running', reportFile: path.join(dir, 'report.txt') };
   const history = [], save = () => { history.push(structuredClone(job)); fs.writeFileSync(path.join(dir, 'job.json'), JSON.stringify(job)); };
   save(); const child = new FakeChild(), controller = new AbortController();
-  const task = runSdk(child, { job, dir, prompt: 'test only', save, emit, signal: controller.signal }); task.catch(() => {});
+  const task = runSdk(child, { job, dir, prompt: 'test only', save, emit, signal: signal || controller.signal }); task.catch(() => {});
   t.after(async () => {
     controller.abort(new Error('Test cleanup')); await task.catch(() => {});
     child.stdin.destroy(); child.stdout.destroy(); fs.rmSync(root, { recursive: true, force: true });
@@ -163,4 +163,39 @@ test('ending before a plugin receipt rejects the forwarded answer instead of cla
   assert.ok(events(f).some(event => event.event === 'input_rejected' && event.inputId === inputId));
   assert.equal(events(f).some(event => event.event === 'input_delivered' && event.inputId === inputId), false);
   assert.deepEqual(f.job.pendingRequests, []); assert.equal(fs.existsSync(mailbox(f, 'responses', requestId)), false);
+});
+
+test('an already aborted signal rejects the session instead of running it', async t => {
+  const controller = new AbortController();
+  controller.abort(new Error('Already cancelled'));
+  const f = fixture(t, () => {}, controller.signal);
+  await assert.rejects(f.task, /Already cancelled/);
+  assert.equal(fs.existsSync(f.job.reportFile), false);
+  assert.equal(f.child.waiting, undefined);
+});
+
+test('eventsPage ignores an unterminated tail and reports no more pages', async t => {
+  const root = fs.mkdtempSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'events-fixture-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'events.jsonl'), job = { id: 'events-job', eventsFile: file };
+  const line = event => JSON.stringify({ event }) + '\n';
+  fs.writeFileSync(file, line('first') + '{"event":"partial"');
+  const page = eventsPage(job);
+  assert.deepEqual(page.events, [{ event: 'first' }]);
+  assert.equal(page.more, false);
+  assert.equal(page.cursor, Buffer.byteLength(line('first')));
+  assert.deepEqual(eventsPage(job, page.cursor).events, []);
+});
+
+test('eventsPage keeps more true while complete records remain past the limit', async t => {
+  const root = fs.mkdtempSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'events-fixture-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'events.jsonl'), job = { id: 'events-job', eventsFile: file };
+  fs.writeFileSync(file, ['first', 'second', 'third'].map(event => JSON.stringify({ event }) + '\n').join(''));
+  const page = eventsPage(job, 0, 2);
+  assert.deepEqual(page.events, [{ event: 'first' }, { event: 'second' }]);
+  assert.equal(page.more, true);
+  const rest = eventsPage(job, page.cursor, 2);
+  assert.deepEqual(rest.events, [{ event: 'third' }]);
+  assert.equal(rest.more, false);
 });

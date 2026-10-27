@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectTranscript, groupSessionsByTime } from '../lib/viewer-model.mjs';
+import { projectTranscript, groupSessionsByTime, relativePath } from '../lib/viewer-model.mjs';
+
+test('relative paths fold case only for Windows-style paths, so POSIX sibling directories are not mistaken for the project', () => {
+  assert.equal(relativePath('/work/proj/src/a.js', '/work/proj'), 'src/a.js');
+  assert.equal(relativePath('/work/Proj/other/README.md', '/work/proj'), '/work/Proj/other/README.md');
+  assert.equal(relativePath('C:\\Work\\Proj\\src\\a.js', 'c:/work/proj'), 'src/a.js');
+});
 
 test('time groups follow local calendar boundaries and keep the newest update first', () => {
   const now = new Date(2026, 0, 15, 0, 5).getTime();
