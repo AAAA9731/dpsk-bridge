@@ -108,6 +108,16 @@ function outputRecords(out) {
   return fs.readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
 
+async function waitForEvent(id, home, name, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = eventsPage(readJob(id, home), 0, 200).events.find(event => event.event === name);
+    if (found) return found;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for event ${name}`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
 test('wait returns finished immediately for a terminal job', async t => {
   const { options, home } = setup(t, 'wait finished');
   const job = await runJob(options, () => {}, home);
@@ -157,6 +167,35 @@ test('wait returns timeout for a running job and errors for bad timeouts or miss
   await assert.rejects(waitJob(job, 0, home), /timeout must be between 1 and 3600 seconds/);
   await assert.rejects(waitJob(job, 3601, home), /timeout must be between 1 and 3600 seconds/);
   await assert.rejects(waitJob({ id: '00000000-0000-4000-8000-000000000000' }, 1, home), /ENOENT/);
+});
+
+test('wait keeps pending requests out of actionableRequests while the job is finishing', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dpsk-bridge-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'bridge'), id = '00000000-0000-4000-8000-000000000001';
+  const dir = path.join(home, 'jobs', id), requestId = '00000000-0000-4000-8000-000000000002';
+  fs.mkdirSync(dir, { recursive: true });
+  const job = { version: 2, id, parentId: null, rootId: id, processState: 'finishing',
+    supervisorPid: process.pid, pendingRequests: [{ requestId, method: 'user-question/ask', params: {} }],
+    startedAt: Date.now(), review: null, exitCode: null, reportedResult: null, cwd: root,
+    reportFile: path.join(dir, 'report.txt'), stderrFile: path.join(dir, 'stderr.log'), eventsFile: path.join(dir, 'events.jsonl') };
+  const file = path.join(dir, 'job.json');
+  fs.writeFileSync(file, JSON.stringify(job));
+
+  const began = Date.now();
+  const waited = await waitJob({ id }, 1, home);
+  assert.equal(waited.reason, 'timeout');
+  assert.ok(Date.now() - began >= 900, `wait returned after ${Date.now() - began}ms`);
+  assert.deepEqual(waited.actionableRequests, []);
+  assert.deepEqual(waited.pendingRequests.map(request => request.requestId), [requestId]);
+
+  // A real run clears pendingRequests when the job ends.
+  job.processState = 'completed'; job.pendingRequests = [];
+  fs.writeFileSync(file, JSON.stringify(job));
+  const done = await waitJob({ id }, 1, home);
+  assert.equal(done.reason, 'finished');
+  assert.equal(done.processState, 'completed');
+  assert.deepEqual(done.actionableRequests, []);
 });
 
 test('notify runs once on finish and receives job data only through the environment', async t => {
@@ -232,6 +271,52 @@ test('a failing notify command is recorded without changing the job result', asy
   assert.equal(failures[0].notifyEvent, 'finished');
   assert.equal(failures[0].exitCode, 1);
   assert.match(failures[0].reason, /exit/);
+});
+
+test('a request notify failure carries requestId while a finished failure does not', async t => {
+  const { root, options, home } = setup(t, '[chat] notify failure correlation');
+  const { command } = nodeCommand(root, 'notify-fail-both', 'process.exit(1);');
+  const { started, running } = background(t, { ...options, notifyCmd: command }, home);
+  const id = await started;
+  const request = await waitJob({ id }, 10, home);
+  assert.equal(request.reason, 'request');
+  const requestId = request.pendingRequests[0].requestId;
+  sendMessage(readJob(id, home), 'host follow up', home);
+  answerRequest(readJob(id, home), requestId,
+    { answers: [{ id: 'choice', selected: [], custom: 'Continue' }] }, home);
+  const finished = await waitJob({ id }, 10, home);
+  assert.equal(finished.reason, 'finished');
+  const job = await running;
+  assert.equal(job.processState, 'completed', job.error);
+  const failures = eventsPage(job, 0, 200).events.filter(event => event.event === 'notify_failed');
+  assert.equal(failures.length, 2);
+  const requestFailure = failures.find(event => event.notifyEvent === 'request');
+  const finishedFailure = failures.find(event => event.notifyEvent === 'finished');
+  assert.equal(requestFailure.requestId, requestId);
+  assert.equal(requestFailure.exitCode, 1);
+  assert.equal('requestId' in finishedFailure, false);
+  assert.equal(finishedFailure.exitCode, 1);
+});
+
+test('a rejected answer records the requestId on input_rejected', async t => {
+  const { options, home } = setup(t, '[chat] rejected answer');
+  const { started, running } = background(t, options, home);
+  const id = await started;
+  const request = await waitJob({ id }, 10, home);
+  assert.equal(request.reason, 'request');
+  const requestId = request.pendingRequests[0].requestId;
+  const queued = answerRequest(readJob(id, home), requestId, { answers: [] }, home);
+  const rejected = await waitForEvent(id, home, 'input_rejected');
+  assert.equal(rejected.requestId, requestId);
+  assert.equal(rejected.inputId, queued.inputId);
+  assert.match(rejected.error, /Answer each original question id/);
+  sendMessage(readJob(id, home), 'host follow up', home);
+  answerRequest(readJob(id, home), requestId,
+    { answers: [{ id: 'choice', selected: [], custom: 'Continue' }] }, home);
+  const finished = await waitJob({ id }, 10, home);
+  assert.equal(finished.reason, 'finished');
+  const job = await running;
+  assert.equal(job.processState, 'completed', job.error);
 });
 
 test('a timed-out notify command is terminated without changing the job result', async t => {

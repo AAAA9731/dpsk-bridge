@@ -28,7 +28,7 @@ description: Install, import, inspect, update, or remove MCP server patches for 
 
 再验证连接与工具注册。如果已有无需模型调用的 MCP 客户端或探测工具，优先复用它。否则通过一次有超时上限的 `dsb run --patch <文件>`，让 dsh 确认指定前缀工具存在，并调用一个与目标匹配、无需额外外部动作的只读工具；返回工具名和简短结果证据。默认路由为 `deepseek-official` / `deepseek-flash`，可用 `--provider` / `--model` 或 `DPSK_PROVIDER` / `DPSK_MODEL` 覆盖。前提未满足时不调用，不能拿模型列出的名称代替真实调用结果。
 
-验证中保留宿主进程会话，用短而有界的等待读取 `dsb events <ID>` 和 `dsb status <ID>` 的 `pendingRequests`。使用 `dsb answer` 回复问题或权限请求，只有现有用户授权覆盖操作时才能批准；不能自行决定时向用户澄清。入队不等于送达，按 `deepseek-delegate` skill 的“双向消息与请求”核对 `input_delivered` / `input_rejected`（`input_forwarded` 不算送达）。共享同一应用或 MCP 实例的并发作业应使用相同 `--resource <名称>`；只读声明和资源预约不能替代应用权限或沙箱。
+验证中保留宿主进程会话，按 `deepseek-delegate` skill 用 `dsb wait` 等待，返回后读取 `dsb events <ID>` 和 `dsb status <ID>` 的 `pendingRequests`。使用 `dsb answer` 回复问题或权限请求，只有现有用户授权覆盖操作时才能批准；不能自行决定时向用户澄清。入队不等于送达，按 `deepseek-delegate` skill 的“双向消息与请求”核对 `input_delivered` / `input_rejected`（`input_forwarded` 不算送达）。共享同一应用或 MCP 实例的并发作业应使用相同 `--resource <名称>`；只读声明和资源预约不能替代应用权限或沙箱。
 
 一次验证同时覆盖发现与只读调用，不分成两次付费模型调用。工具错误、无工具、权限不足分别报告；未经实际调用验证时明确说明，不能标记为已验证。将验证时间、server/patch 版本及简短结果记在 patch 的额外注释中（不改变前四行）；后续配置或依赖发生变化时再验证。
 

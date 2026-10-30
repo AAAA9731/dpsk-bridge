@@ -44,7 +44,7 @@ dsb result <作业ID>
 dsb cancel <作业ID>
 ```
 
-run 保持连接；宿主保留执行句柄，在有界等待间读取问题和更新。命令工具不能在运行期间返回输出时，把 --timeout 设为可接受上限，结束后用 dsb result 读取结果；这类宿主只适合派不需要中途决策的任务。events 返回完整事件与字节 cursor，将它传给下一次 --after；more 表示还有未读事件。status.pendingRequests 列出问题或审批。普通问题的回复文件按原问题 ID 一一填写：
+run 保持连接；宿主保留执行句柄，用 `dsb wait`（见下）等待，返回后读取问题和更新。命令工具不能在运行期间返回输出时，把 --timeout 设为可接受上限，结束后用 dsb result 读取结果；这类宿主只适合派不需要中途决策的任务。events 返回完整事件与字节 cursor，将它传给下一次 --after；more 表示还有未读事件。status.pendingRequests 列出问题或审批。普通问题的回复文件按原问题 ID 一一填写：
 
 ```json
 {"answers":[{"id":"original-question-id","selected":[],"custom":"宿主补充的信息"}]}
@@ -54,9 +54,9 @@ run 保持连接；宿主保留执行句柄，在有界等待间读取问题和�
 
 send/answer 返回 queued 只表示进入邮箱，须在事件中确认 input_delivered 或 input_rejected；通过文件通道转交给宿主插件的回答会先出现 input_forwarded（已转交、等待消费），它不等于已送达，仍要继续等 input_delivered 或 input_rejected。追加要求进入后续回合，不打断当前步骤。结束后不能原地追加，应新建任务或 retry。
 
-宿主没有“后台命令结束时自动唤醒模型”的能力时，不要循环查询 status 或 events，每次查询都是一次付费的模型调用。把 run 放到后台或进程会话里，再用 `dsb wait <作业ID> --timeout <秒>` 等待：它只读本地文件，作业结束（finished）、出现需要回复的问题或审批（request）、或超时（timeout）时返回一次，等待期间不调用模型。--timeout 默认 600 秒，范围 1–3600，不能超过宿主单次命令允许的时长。已经用 answer 回复、回答尚在排队或已被处理的请求不会让 wait 再次返回 request，除非后来出现 input_rejected。wait 的返回只说明发生了什么，不代表成功，仍要读取结果并验收。
+宿主没有“后台命令结束时自动唤醒模型”的能力时，不要循环查询 status 或 events，每次查询都是一次付费的模型调用。把 run 放到后台或进程会话里，再用 `dsb wait <作业ID> --timeout <秒>` 等待：它只读本地文件，作业结束（finished，含 cleanup_failed）、启动器意外结束（unknown）、出现需要回复的问题或审批（request）、或超时（timeout）时返回一次，等待期间不调用模型。--timeout 默认 600 秒，范围 1–3600，不能超过宿主单次命令允许的时长。返回里的 actionableRequests 是尚未回复的请求 ID；pendingRequests 仍列出全部待回复请求。已经用 answer 回复、回答尚在排队或已被处理的请求不会让 wait 再次返回 request，除非后来出现 input_rejected。wait 的返回只说明发生了什么，不代表成功，仍要读取结果并验收。
 
-run 和 retry 还支持实验性的 `--notify-cmd <命令>`：作业结束，或出现新的待回复请求（每个 requestId 只通知一次）时，由 dsb 在本机执行该命令一次，用来唤醒宿主。命令通过环境变量 DSB_JOB_ID、DSB_EVENT（finished 或 request）、DSB_STATE、DSB_RESULT、DSB_REQUEST_ID 获知情况，这些值不会拼进命令行；命令最多运行 30 秒，输出写入作业目录的 notify.log，失败或超时只在事件里记录 notify_failed，不影响作业结果。命令不能为空、不能含换行、最长 2000 字符；retry 沿用原作业的命令，也可以重新指定。这个功能尚未在任何真实宿主上验证，如何用它唤醒具体宿主（例如续接会话的命令）需要自行确认。
+run 和 retry 还支持实验性的 `--notify-cmd <命令>`：作业结束，或出现新的待回复请求（每个 requestId 只通知一次）时，由 dsb 在本机执行该命令一次，用来唤醒宿主。命令通过环境变量 DSB_JOB_ID、DSB_EVENT（finished 或 request）、DSB_STATE、DSB_RESULT、DSB_REQUEST_ID 获知情况，这些值不会拼进命令行；命令最多运行 30 秒，输出写入作业目录的 notify.log，成功记录 notify_sent，失败或超时记录 notify_failed（request 通知的两种事件都带 requestId），不影响作业结果；超时会终止命令及其子进程。命令不能为空、不能含换行、最长 2000 字符；retry 沿用原作业的命令，也可以重新指定。这个功能尚未在任何真实宿主上验证，如何用它唤醒具体宿主（例如续接会话的命令）需要自行确认。
 
 默认路由为 deepseek-official/deepseek-flash，可用参数或 DPSK_PROVIDER/DPSK_MODEL 覆盖。模型路由在每次 SDK 初始化时明确设置。--dsh-entry 可以指定本机 dsh 的 lib/bin.js。
 

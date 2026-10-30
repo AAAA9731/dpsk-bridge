@@ -16,11 +16,11 @@ const usage = `dsb — dpsk-bridge: host-neutral, bidirectional DeepSeek delegat
     accounting JSON: {"currency":"CNY","source":"<source>","<host>Cost":<number>,"deepseekCost":<number>} (any key ending in Cost is recorded)
   dsb unlock <id> --confirmed-stopped
   dsb stats
-Run/retry stay attached until the job ends: keep the process/session handle your host provides and read events and requests with bounded waits (see the deepseek-delegate skill).
+Run/retry stay attached until the job ends: keep the process/session handle your host provides and wait for them with "dsb wait" and read events and requests after each return (see the deepseek-delegate skill).
 SDK defaults: deepseek-official / deepseek-flash (override with DPSK_PROVIDER/DPSK_MODEL).
 Global concurrency defaults to 8 (DPSK_CONCURRENCY); scopes/resources are cooperative declarations.
 send/answer queue input; events confirms delivery. Followups enter the next turn.
-wait returns once when the job ends, a new request needs an answer, or --timeout (default 600s) elapses.
+wait returns once when the job ends (finished), the launcher died (unknown), a request needs an answer (request), or --timeout (default 600s, 1-3600) elapses (timeout).
 A request with an answer already queued or delivered does not wake wait again until it is rejected.
 A finished wait does not mean success; handle request results with events/answer. wait makes no model call.
 --notify-cmd runs a local command after the job ends and once per new request (max 30s; failures do not affect the job).
