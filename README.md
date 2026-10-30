@@ -36,6 +36,7 @@ dsb run --cwd "项目路径" --brief "brief.md" --timeout 2700
 dsb run --cwd "项目路径" --brief "brief.md" --patch "MCP配置.yml"
 dsb run --cwd "项目路径" --brief "brief.md" --provider deepseek-official --model deepseek-flash
 dsb status <作业ID>
+dsb wait <作业ID> --timeout 600
 dsb events <作业ID> --after 0 --limit 20
 dsb send <作业ID> --message-file "追加要求.md"
 dsb answer <作业ID> --request <requestId> --answer "回复.json"
@@ -52,6 +53,10 @@ run 保持连接；宿主保留执行句柄，在有界等待间读取问题和�
 审批使用 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。宿主依据实际授权决定，桥不会自动授予权限；需要用户决定时先澄清。随作业加载的 Harness 插件转发提问和审批，SDK 负责追加消息及实时日志，每项作业拥有独立 SDK 进程。
 
 send/answer 返回 queued 只表示进入邮箱，须在事件中确认 input_delivered 或 input_rejected；通过文件通道转交给宿主插件的回答会先出现 input_forwarded（已转交、等待消费），它不等于已送达，仍要继续等 input_delivered 或 input_rejected。追加要求进入后续回合，不打断当前步骤。结束后不能原地追加，应新建任务或 retry。
+
+宿主没有“后台命令结束时自动唤醒模型”的能力时，不要循环查询 status 或 events，每次查询都是一次付费的模型调用。把 run 放到后台或进程会话里，再用 `dsb wait <作业ID> --timeout <秒>` 等待：它只读本地文件，作业结束（finished）、出现需要回复的问题或审批（request）、或超时（timeout）时返回一次，等待期间不调用模型。--timeout 默认 600 秒，范围 1–3600，不能超过宿主单次命令允许的时长。已经用 answer 回复、回答尚在排队或已被处理的请求不会让 wait 再次返回 request，除非后来出现 input_rejected。wait 的返回只说明发生了什么，不代表成功，仍要读取结果并验收。
+
+run 和 retry 还支持实验性的 `--notify-cmd <命令>`：作业结束，或出现新的待回复请求（每个 requestId 只通知一次）时，由 dsb 在本机执行该命令一次，用来唤醒宿主。命令通过环境变量 DSB_JOB_ID、DSB_EVENT（finished 或 request）、DSB_STATE、DSB_RESULT、DSB_REQUEST_ID 获知情况，这些值不会拼进命令行；命令最多运行 30 秒，输出写入作业目录的 notify.log，失败或超时只在事件里记录 notify_failed，不影响作业结果。命令不能为空、不能含换行、最长 2000 字符；retry 沿用原作业的命令，也可以重新指定。这个功能尚未在任何真实宿主上验证，如何用它唤醒具体宿主（例如续接会话的命令）需要自行确认。
 
 默认路由为 deepseek-official/deepseek-flash，可用参数或 DPSK_PROVIDER/DPSK_MODEL 覆盖。模型路由在每次 SDK 初始化时明确设置。--dsh-entry 可以指定本机 dsh 的 lib/bin.js。
 
