@@ -5,8 +5,8 @@
 | 现象 | 处理 |
 |---|---|
 | 任务等待问题或权限回复 | 读取 `dsb status <ID>` 的 `pendingRequests` 和 `dsb events <ID>`，用 `dsb answer` 回复。只批准已有用户授权覆盖的操作，不能自行决定时向用户澄清；不要关闭沙箱来绕过审批。 |
-| `send` / `answer` 已返回 `queued`，执行没有变化 | 入队不是送达。保存返回的输入 ID，翻页查找对应 `input_delivered` / `input_rejected`，必要时核对请求是否已取消。通过文件通道转交给宿主插件的回答会先出现 `input_forwarded`（已转交、等待消费），它不等于已送达，仍要继续等 `input_delivered` 或 `input_rejected`。追加消息进入下一轮，不打断当前 step。 |
-| 作业停在 `queued` | 检查并发上限、同工作区范围冲突和同名 `--resource` 的占用。默认并发为 8，可通过 `DPSK_CONCURRENCY` 或 `--max-concurrent 1..256` 调整；不能为插队而虚报只读或缩小写入范围。取消和超时包含排队时间。 |
+| `send` / `answer` 已返回 `queued`，执行没有变化 | 入队不是送达。保存返回的输入 ID，翻页查找对应 `input_delivered` / `input_rejected`，必要时核对请求是否已取消。`input_forwarded`（已转交宿主插件）同样不算送达。追加消息进入下一轮，不打断当前 step。 |
+| 作业停在 `queued` | 检查并发上限（见 SKILL.md“调用与等待”）、同工作区范围冲突和同名 `--resource` 的占用；不能为插队而虚报只读或缩小写入范围。取消和超时包含排队时间。 |
 | Node.js、dsh 或作业版本不受支持 | 更新到 Node.js >=24.9、`@deepseek-ai/dsh` >=0.2.1-rc.3 和当前桥。只支持新版 SDK、v4 会话和当前作业格式；不要与旧版启动器混跑。 |
 | `detected dubious ownership` | 确认是本次授权项目后，在该条 Git 命令使用 `git -c safe.directory='<项目路径>' ...`，不改全局信任配置。 |
 | `cannot modify ...: file has not been read` | 覆盖已有文件前先读取，核对是否有其他进程改动。 |
@@ -21,9 +21,7 @@
 
 `dsb cancel <ID>` 返回的是取消请求已排队。等作业进入 `cancelled` 后才重派。`cleanup_failed` 表示进程树清理未确认成功，`unknown` 表示启动器意外结束且缺少退出记录；两者都保留调度预约。检查作业记录中的进程和部分成果，确认原任务及相关子进程停止后，才用 `dsb unlock <ID> --confirmed-stopped` 清理本作业的预约，再创建新任务。不要删除别人的预约或仅按超时猜测进程已经退出。
 
-任务仍在运行时先检查当前进度。用 `dsb send <ID> --message-file <UTF-8 文件>` 追加上下文，用 `dsb answer <ID> --request <请求 ID> --answer <JSON 文件>` 回复问题。普通答案为 `{"answers":[{"id":"问题 ID","selected":[],"custom":"回复"}]}`，每个原始问题 ID 回复一次；审批答案为 `{"outcome":"allowed-once"}`、`{"outcome":"rejected"}` 或 `{"outcome":"cancelled"}`。主代理只能转发已经取得的授权，无法判断时向用户澄清。作业结束后不能再发送消息；`dsb retry` 携带原始要求与修复反馈创建新会话。
-
-事件读取从 `dsb events <ID> --after 0 --limit 20` 开始，保存返回的字节 `cursor`；`more` 为真时继续读取。默认每页 20、上限 200；不要用事件条数推算游标。收到 `input_rejected` 后根据具体原因修正，不把入队回执当作执行成功。
+任务仍在运行时先检查当前进度，再按 SKILL.md 的“双向消息与请求”用 `dsb send` 追加上下文、用 `dsb answer` 回复问题，用 `dsb events` 读取更新。主代理只能转发已经取得的授权，无法判断时向用户澄清。作业结束后不能再发送消息；`dsb retry` 携带原始要求与修复反馈创建新会话。收到 `input_rejected` 后根据具体原因修正，不把入队回执当作执行成功。
 
 ## 从部分成果续做
 
